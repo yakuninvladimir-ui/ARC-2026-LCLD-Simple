@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Generated competition artifacts
+notebooks/
+assets/
+*.ipynb
+*.zip
+*.log
+
+# External runtimes and models
+environment/
+environment_files/
+llama-runtime/
+llama.cpp/
+qwen/
+*.gguf
+*.safetensors
+*.so
+llama-cli
+llama-server
+
+# Local secrets and editor files
+.env
+.env.*
+.idea/
+.vscode/
+

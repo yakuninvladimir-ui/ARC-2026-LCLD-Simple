@@ -1,0 +1,5 @@
+[project]
+name = "arc-2026-lcld-simple"
+version = "8.3.0"
+description = "Compact Qwen-assisted ARC-AGI-3 competition agent"
+requires-python = ">=3.12"
