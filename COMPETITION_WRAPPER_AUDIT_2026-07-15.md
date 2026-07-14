@@ -30,6 +30,7 @@ Intentional differences from Tufa are the requested `98304` model context, `6553
 ## Parquet Failure Policy
 
 Phase A writes the required nonempty one-row dummy parquet only for a non-rerun notebook validation. It does not start vLLM.
+Its static preflight does not enforce the Phase-B RTX6000 type because Kaggle may run Phase A on a P100. Phase B performs the strict one-RTX6000 check before model startup.
 
 Phase B has no `to_parquet()` path. Its order is:
 
@@ -45,7 +46,7 @@ Any Phase-B exception is re-raised. The fatal handler does not call `close_score
 ## Verification
 
 - `python -m pytest tests -q`: 106 passed.
-- Production notebook rebuilt successfully: 211183 bytes, 25 embedded Python files.
+- Production notebook rebuilt successfully: 211528 bytes, 25 embedded Python files.
 - All generated code cells and all embedded Python files compile.
 - Static order check passes: model smoke -> scorecard create -> game make/step -> normal close -> parquet validation.
 

@@ -475,13 +475,24 @@ def write_diagnostics_manifest(*, phase, runtime_info, arcade_env_path, heavy_di
     return manifest
 
 
-def setup_runtime(*, phase, heavy_diagnostics, qwen_probe, full_import_sweep=False, start_model_server=True):
+def setup_runtime(
+    *,
+    phase,
+    heavy_diagnostics,
+    qwen_probe,
+    full_import_sweep=False,
+    start_model_server=True,
+    validate_accelerator=True,
+):
     del full_import_sweep
     print(f'=== LCLD Qwen {phase} runtime setup START ===', flush=True)
     code_dir = _assert_payload_structure()
     model_path, weight_bytes = _find_qwen_model()
     _dataset_mount(VLLM_WHEELHOUSE_DATASET)
-    _assert_expected_cuda_gpu()
+    if validate_accelerator:
+        _assert_expected_cuda_gpu()
+    else:
+        print('Accelerator type check skipped for static phase:', phase, flush=True)
     _configure_qwen_env(model_path)
     arcade_env_path = setup_arcade_client_env()
     if heavy_diagnostics:
@@ -505,6 +516,7 @@ def setup_runtime(*, phase, heavy_diagnostics, qwen_probe, full_import_sweep=Fal
         'wheelhouse_path': str(_dataset_mount(VLLM_WHEELHOUSE_DATASET)),
         'server': server_info,
         'code_dir': str(code_dir),
+        'accelerator_check_required': bool(validate_accelerator),
     }
     manifest = write_diagnostics_manifest(
         phase=phase,

@@ -391,6 +391,7 @@ if IS_PHASE_B_CANDIDATE:
             heavy_diagnostics=False,
             qwen_probe=False,
             full_import_sweep=False,
+            validate_accelerator=True,
         )
         # vLLM loads asynchronously while gateway setup and imports run. A short
         # model gate runs before scorecard creation; every game then starts with

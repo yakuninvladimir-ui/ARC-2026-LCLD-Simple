@@ -213,13 +213,16 @@ def test_generated_qwen_notebook_contract_and_payload():
     assert "'--enable-prefix-caching'" in common_source
     assert "'chat_template_kwargs': {'enable_thinking': False}" in common_source
     assert "def _assert_expected_cuda_gpu():" in common_source
+    assert "if validate_accelerator:" in common_source
     assert "def gateway_handshake_or_die():" in common_source
     assert "Kaggle gateway did not become ready within 600s" in common_source
     assert "'curl'" not in common_source
     assert "python-dotenv" not in all_source
 
     assert "start_model_server=False" in phase_a_source
+    assert "validate_accelerator=False" in phase_a_source
     assert "start_vllm_server(" not in phase_a_source
+    assert "validate_accelerator=True" in phase_b_source
     assert "phase_b_model_smoke_or_die()" in phase_b_source
     assert phase_b_source.index("phase_b_model_smoke_or_die()") < phase_b_source.index("arcade.create_scorecard()")
     assert "initial_reset_pending = True" in phase_b_source

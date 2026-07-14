@@ -2,6 +2,7 @@
 
 ## 2026-07-15 competition fail-fast audit
 
+- Split accelerator validation by execution phase: static Phase A can run on Kaggle's default P100, while Phase B still requires exactly one RTX6000 before starting vLLM.
 - Re-audited the generated notebook against the Tufa Qwen/vLLM launcher and the standard `ARC-AGI-3-Agents` Arcade lifecycle.
 - Moved all real-model readiness checks before scorecard creation and kept one explicit scorecard for all competition games.
 - Made every Phase-B game exception fatal instead of continuing to a zero-result scorecard close.

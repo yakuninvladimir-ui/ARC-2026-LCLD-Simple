@@ -23,6 +23,7 @@ if not IS_PHASE_B_CANDIDATE:
             qwen_probe=False,
             full_import_sweep=False,
             start_model_server=False,
+            validate_accelerator=False,
         )
         server_info = manifest['runtime_info']['server']
         if not server_info.get('skipped') or server_info.get('pid') is not None:
