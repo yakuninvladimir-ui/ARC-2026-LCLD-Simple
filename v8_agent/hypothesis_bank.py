@@ -80,6 +80,9 @@ class HypothesisBank:
     def has_executable_candidate(self, snapshot: ARGALiteSnapshot) -> bool:
         return self.next_candidate_action(snapshot, dry_run=True) is not None
 
+    def has_executable_coordinate_candidate(self, snapshot: ARGALiteSnapshot) -> bool:
+        return self.next_candidate_action(snapshot, "coordinate", dry_run=True) is not None
+
     def add_qwen_output(self, role: QwenRole, output: dict[str, Any] | None, snapshot: ARGALiteSnapshot, config: V8Config, packet: dict[str, Any] | None = None) -> None:
         self._current_step = snapshot.step_index
         if not output:
@@ -246,6 +249,7 @@ class HypothesisBank:
             if not isinstance(raw, dict):
                 self.invalid_rejections.append({"reason": "bad_semantic_trajectory_record", "raw": raw})
                 continue
+            model_raw = model_hypotheses[index] if isinstance(model_hypotheses, list) and index < len(model_hypotheses) and isinstance(model_hypotheses[index], dict) else raw
             if str(raw.get("status") or "") != "complete_candidate":
                 self.invalid_rejections.append({"reason": "incomplete_semantic_trajectory_rejected", "raw": raw})
                 continue
@@ -343,10 +347,25 @@ class HypothesisBank:
                 })
                 continue
             objective_kind = str(objective.get("kind") or "other")
-            if objective_kind not in {"surface_change", "other"} and not all_objects:
+            if (
+                objective_kind not in {"surface_change", "other"}
+                and not all_objects
+                and not _v87_has_bound_coordinate_action(model_raw, packet)
+            ):
                 self.invalid_rejections.append({"reason": "ungrounded_objective_without_objects", "raw": raw})
                 continue
-            model_raw = model_hypotheses[index] if isinstance(model_hypotheses, list) and index < len(model_hypotheses) and isinstance(model_hypotheses[index], dict) else raw
+            repeated_failure = (
+                _v87_matching_failed_trajectory(model_raw, packet)
+                if config.reject_unchanged_failed_trajectories
+                else None
+            )
+            if repeated_failure is not None:
+                self.invalid_rejections.append({
+                    "reason": "unchanged_failed_trajectory_repeat",
+                    **repeated_failure,
+                    "raw": raw,
+                })
+                continue
             if not _v87_trajectory_respects_control_context(model_raw, packet):
                 self.invalid_rejections.append({"reason": "trajectory_uses_effect_from_wrong_control_context", "raw": raw})
                 continue
@@ -987,8 +1006,6 @@ class HypothesisBank:
         }
         if item.has_next_step():
             item.cursor += 1
-        if "qwen" in item.source and item.proposal_batch_id:
-            self._invalidate_stale_batch_siblings(item)
         if mechanics_mismatch and "qwen" in item.source:
             item.validity = Validity.INVALID
             if item not in self.rejected:
@@ -1019,12 +1036,6 @@ class HypothesisBank:
             self._active_hypothesis_id = None
         self._purge_consumed_and_invalid(self._current_step)
         self._sort()
-
-    def _invalidate_stale_batch_siblings(self, active: HypothesisItem) -> None:
-        for sibling in self.semantic_test_queue:
-            if sibling is active or sibling.proposal_batch_id != active.proposal_batch_id:
-                continue
-            sibling.validity = Validity.INVALID
 
     def current_questions(self, config: V8Config, snapshot: ARGALiteSnapshot | None = None) -> list[str]:
         questions: list[str] = []
@@ -1104,6 +1115,69 @@ def _expanded_action_runs(value: Any) -> list[tuple[str, str | None]]:
         if action_id is None or not isinstance(repeat, int) or isinstance(repeat, bool) or repeat <= 0:
             return []
         out.extend((action_id, candidate_id) for _ in range(repeat))
+        if len(out) > 50:
+            return []
+    return out
+
+
+def _v87_matching_failed_trajectory(raw: dict[str, Any], packet: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(packet, dict):
+        return None
+    current = _normalized_recorded_trajectory(raw.get("action_runs"))
+    if not current:
+        return None
+    attempts = (((packet.get("memory") or {}).get("level_attempts") or {}).get("previous_failed_attempts") or [])
+    for attempt in reversed(attempts):
+        if not isinstance(attempt, dict):
+            continue
+        for hypothesis in reversed(attempt.get("executed_hypotheses") or []):
+            if not isinstance(hypothesis, dict):
+                continue
+            outcome = str(hypothesis.get("outcome") or "")
+            if outcome == "LEVEL_PROGRESS_OBSERVED":
+                continue
+            recorded_runs = hypothesis.get("action_runs") or []
+            sources = {
+                str(source)
+                for source in [
+                    hypothesis.get("source"),
+                    *(run.get("source") for run in recorded_runs if isinstance(run, dict)),
+                ]
+                if source
+            }
+            if sources and not any(source.startswith(("primary", "reserve")) for source in sources):
+                continue
+            previous = _normalized_recorded_trajectory(recorded_runs)
+            if previous != current:
+                continue
+            return {
+                "previous_attempt_index": attempt.get("attempt_index"),
+                "previous_hypothesis_id": hypothesis.get("hypothesis_id"),
+                "previous_outcome": outcome or "FAILED_WITHOUT_LEVEL_PROGRESS",
+                "trajectory": [
+                    {
+                        "action_id": action_id,
+                        **({"coordinate_candidate_id": candidate_id} if candidate_id is not None else {}),
+                    }
+                    for action_id, candidate_id in current
+                ],
+            }
+    return None
+
+
+def _normalized_recorded_trajectory(value: Any) -> list[tuple[str, str | None]]:
+    out: list[tuple[str, str | None]] = []
+    if not isinstance(value, list):
+        return out
+    for run in value:
+        if not isinstance(run, dict):
+            return []
+        action_id = _none_or_str(run.get("action_id"))
+        count = run.get("repeat", run.get("count"))
+        candidate_id = _none_or_str(run.get("coordinate_candidate_id"))
+        if action_id is None or not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            return []
+        out.extend((action_id, candidate_id) for _ in range(count))
         if len(out) > 50:
             return []
     return out

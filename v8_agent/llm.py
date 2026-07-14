@@ -6,10 +6,13 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from .config import V8Config
 from .types import QwenRole
@@ -25,6 +28,10 @@ class QwenClient:
             return {}
         if config.qwen_backend == "fake":
             return FakeQwenClient().call(role, packet, config)
+        if config.qwen_backend == "ollama":
+            return self._call_ollama_once(role, packet, config)
+        if config.qwen_backend == "vllm":
+            return self._call_vllm_once(role, packet, config)
         if config.qwen_backend in {"qwen_local", "llama_cli"}:
             result = self._call_llama_cli_once(role, packet, config)
             if result or not config.qwen_empty_output_retry_enabled or not _packet_has_semantic_content(packet):
@@ -76,8 +83,9 @@ class QwenClient:
             # the raw-completion frontend supplied by the same llama.cpp build.
             cmd.append("--no-conversation")
         else:
+            if not _runtime_logs_enabled():
+                cmd.append("--log-disable")
             cmd.extend([
-                "--log-disable",
                 "--single-turn",
                 "--chat-template-kwargs", json.dumps({"enable_thinking": False}, separators=(",", ":")),
             ])
@@ -138,6 +146,285 @@ class QwenClient:
         _write_qwen_trace_output(trace_base, proc.stdout, proc.stderr, extracted, "json_schema_valid" if extracted else "parse_or_schema_invalid", elapsed_seconds=elapsed)
         return extracted
 
+    def _call_ollama_once(self, role: QwenRole, packet: dict[str, Any], config: V8Config) -> dict[str, Any]:
+        compacted = _fit_packet_to_budget(role, packet, config)
+        prompt = _prompt(role, compacted, config)
+        output_schema = _allowed_output_schema(role, compacted)
+        base_url = _normalize_ollama_base_url(config.qwen_ollama_base_url)
+        model = str(config.qwen_ollama_model or "qwen_local_3_5")
+        endpoint = f"{base_url}/api/chat"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            # Qwen enables thinking through its chat template unless this is explicit.
+            "think": False,
+            "format": output_schema,
+            "keep_alive": _ollama_keep_alive_value(config.qwen_ollama_keep_alive),
+            "options": {
+                "num_ctx": max(1, int(config.qwen_context_tokens)),
+                "num_predict": max(1, int(config.qwen_max_output_tokens)),
+                "temperature": float(config.qwen_temperature),
+                "top_k": max(0, int(config.qwen_top_k)),
+                "top_p": float(config.qwen_top_p),
+                "min_p": float(config.qwen_min_p),
+                "repeat_penalty": float(config.qwen_repeat_penalty),
+                "seed": int(config.qwen_seed),
+            },
+        }
+        command_description = [
+            "OLLAMA_POST",
+            endpoint,
+            f"model={model}",
+            "stream=false",
+            "think=false",
+            f"num_ctx={int(config.qwen_context_tokens)}",
+            f"num_predict={int(config.qwen_max_output_tokens)}",
+        ]
+        trace_base = _write_qwen_trace_input(role, compacted, prompt, command_description, config)
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        request = urllib_request.Request(
+            endpoint,
+            data=body,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        started = time.monotonic()
+        try:
+            with urllib_request.urlopen(request, timeout=max(1, int(config.qwen_timeout_seconds))) as response:
+                raw_response = response.read().decode("utf-8", errors="replace")
+        except urllib_error.HTTPError as exc:
+            elapsed = time.monotonic() - started
+            error_body = exc.read().decode("utf-8", errors="replace")
+            status = f"http_{int(exc.code)}"
+            _write_qwen_trace_output(
+                trace_base,
+                "",
+                error_body or str(exc),
+                {},
+                status,
+                elapsed_seconds=elapsed,
+                runtime_metadata={"backend": "ollama", "model": model, "endpoint": endpoint},
+            )
+            if config.qwen_require_runtime:
+                raise QwenBackendError(f"ollama_{status}: {(error_body or str(exc))[-1600:]}") from exc
+            return {}
+        except (socket.timeout, TimeoutError) as exc:
+            elapsed = time.monotonic() - started
+            _write_qwen_trace_output(
+                trace_base,
+                "",
+                str(exc),
+                {},
+                "timeout",
+                elapsed_seconds=elapsed,
+                runtime_metadata={"backend": "ollama", "model": model, "endpoint": endpoint},
+            )
+            if config.qwen_require_runtime:
+                raise QwenBackendError("ollama_timeout") from exc
+            return {}
+        except urllib_error.URLError as exc:
+            elapsed = time.monotonic() - started
+            reason = getattr(exc, "reason", exc)
+            is_timeout = isinstance(reason, (socket.timeout, TimeoutError))
+            status = "timeout" if is_timeout else "connection_error"
+            _write_qwen_trace_output(
+                trace_base,
+                "",
+                str(exc),
+                {},
+                status,
+                elapsed_seconds=elapsed,
+                runtime_metadata={"backend": "ollama", "model": model, "endpoint": endpoint},
+            )
+            if config.qwen_require_runtime:
+                raise QwenBackendError(f"ollama_{status}: {exc}") from exc
+            return {}
+
+        elapsed = time.monotonic() - started
+        try:
+            response_data = json.loads(raw_response)
+        except json.JSONDecodeError as exc:
+            _write_qwen_trace_output(
+                trace_base,
+                raw_response,
+                str(exc),
+                {},
+                "invalid_backend_response",
+                elapsed_seconds=elapsed,
+                runtime_metadata={"backend": "ollama", "model": model, "endpoint": endpoint},
+            )
+            if config.qwen_require_runtime:
+                raise QwenBackendError("ollama_invalid_json_response") from exc
+            return {}
+
+        message = response_data.get("message", {}) if isinstance(response_data, dict) else {}
+        content = str(message.get("content") or "") if isinstance(message, dict) else ""
+        extracted = _extract_json(content, role=role)
+        runtime_metadata = _ollama_runtime_metadata(response_data, endpoint=endpoint, model=model)
+        status = "json_schema_valid" if extracted else "parse_or_schema_invalid"
+        _write_qwen_trace_output(
+            trace_base,
+            content,
+            "",
+            extracted,
+            status,
+            elapsed_seconds=elapsed,
+            runtime_metadata=runtime_metadata,
+        )
+        if not extracted and config.qwen_require_runtime:
+            raise QwenBackendError("ollama_parse_or_schema_invalid")
+        return extracted
+
+    def _call_vllm_once(self, role: QwenRole, packet: dict[str, Any], config: V8Config) -> dict[str, Any]:
+        compacted = _fit_packet_to_budget(role, packet, config)
+        prompt = _prompt(role, compacted, config)
+        output_schema = _vllm_compatible_output_schema(_allowed_output_schema(role, compacted))
+        base_url = _normalize_vllm_base_url(config.qwen_vllm_base_url)
+        model = str(config.qwen_vllm_model or "vrfai/Qwen3.6-27B-FP8")
+        endpoint = f"{base_url}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "max_tokens": max(1, int(config.qwen_max_output_tokens)),
+            "temperature": float(config.qwen_temperature),
+            "top_k": max(0, int(config.qwen_top_k)),
+            "top_p": float(config.qwen_top_p),
+            "min_p": float(config.qwen_min_p),
+            "presence_penalty": float(config.qwen_presence_penalty),
+            "repetition_penalty": float(config.qwen_repeat_penalty),
+            "seed": int(config.qwen_seed),
+            "chat_template_kwargs": {"enable_thinking": False},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": f"lcld_{role.value}_response",
+                    "schema": output_schema,
+                    "strict": True,
+                },
+            },
+        }
+        command_description = [
+            "VLLM_OPENAI_POST",
+            endpoint,
+            f"model={model}",
+            "stream=false",
+            "enable_thinking=false",
+            f"max_tokens={int(config.qwen_max_output_tokens)}",
+        ]
+        trace_base = _write_qwen_trace_input(role, compacted, prompt, command_description, config)
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if config.qwen_vllm_api_key:
+            headers["Authorization"] = f"Bearer {config.qwen_vllm_api_key}"
+        request = urllib_request.Request(endpoint, data=body, headers=headers, method="POST")
+        started = time.monotonic()
+        try:
+            with urllib_request.urlopen(request, timeout=max(1, int(config.qwen_timeout_seconds))) as response:
+                raw_response = response.read().decode("utf-8", errors="replace")
+        except urllib_error.HTTPError as exc:
+            elapsed = time.monotonic() - started
+            error_body = exc.read().decode("utf-8", errors="replace")
+            status = f"http_{int(exc.code)}"
+            _write_qwen_trace_output(
+                trace_base,
+                "",
+                error_body or str(exc),
+                {},
+                status,
+                elapsed_seconds=elapsed,
+                runtime_metadata={"backend": "vllm", "model": model, "endpoint": endpoint},
+            )
+            if config.qwen_require_runtime:
+                raise QwenBackendError(f"vllm_{status}: {(error_body or str(exc))[-1600:]}") from exc
+            return {}
+        except (socket.timeout, TimeoutError) as exc:
+            elapsed = time.monotonic() - started
+            _write_qwen_trace_output(
+                trace_base,
+                "",
+                str(exc),
+                {},
+                "timeout",
+                elapsed_seconds=elapsed,
+                runtime_metadata={"backend": "vllm", "model": model, "endpoint": endpoint},
+            )
+            if config.qwen_require_runtime:
+                raise QwenBackendError("vllm_timeout") from exc
+            return {}
+        except urllib_error.URLError as exc:
+            elapsed = time.monotonic() - started
+            reason = getattr(exc, "reason", exc)
+            is_timeout = isinstance(reason, (socket.timeout, TimeoutError))
+            status = "timeout" if is_timeout else "connection_error"
+            _write_qwen_trace_output(
+                trace_base,
+                "",
+                str(exc),
+                {},
+                status,
+                elapsed_seconds=elapsed,
+                runtime_metadata={"backend": "vllm", "model": model, "endpoint": endpoint},
+            )
+            if config.qwen_require_runtime:
+                raise QwenBackendError(f"vllm_{status}: {exc}") from exc
+            return {}
+
+        elapsed = time.monotonic() - started
+        try:
+            response_data = json.loads(raw_response)
+        except json.JSONDecodeError as exc:
+            _write_qwen_trace_output(
+                trace_base,
+                raw_response,
+                str(exc),
+                {},
+                "invalid_backend_response",
+                elapsed_seconds=elapsed,
+                runtime_metadata={"backend": "vllm", "model": model, "endpoint": endpoint},
+            )
+            if config.qwen_require_runtime:
+                raise QwenBackendError("vllm_invalid_json_response") from exc
+            return {}
+
+        response_object = response_data if isinstance(response_data, dict) else {}
+        choices = response_object.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        content = str(message.get("content") or "")
+        extracted = _extract_json(content, role=role)
+        usage = response_object.get("usage") if isinstance(response_object.get("usage"), dict) else {}
+        runtime_metadata = {
+            "backend": "vllm",
+            "endpoint": endpoint,
+            "model": model,
+            "finish_reason": choice.get("finish_reason"),
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+            "reasoning_content_chars": len(str(message.get("reasoning_content") or message.get("reasoning") or "")),
+            "thinking_enabled": False,
+            "response_schema_removed_keywords": _count_removed_vllm_schema_keywords(
+                _allowed_output_schema(role, compacted),
+                output_schema,
+            ),
+        }
+        self.last_call_metrics = dict(runtime_metadata)
+        status = "json_schema_valid" if extracted else "parse_or_schema_invalid"
+        _write_qwen_trace_output(
+            trace_base,
+            content,
+            "",
+            extracted,
+            status,
+            elapsed_seconds=elapsed,
+            runtime_metadata=runtime_metadata,
+        )
+        if not extracted and config.qwen_require_runtime:
+            raise QwenBackendError("vllm_parse_or_schema_invalid")
+        return extracted
+
 
 def _resolve_llama_cli(value: str | os.PathLike[str] | None) -> Path | None:
     if value:
@@ -152,6 +439,94 @@ def _resolve_llama_cli(value: str | os.PathLike[str] | None) -> Path | None:
         if resolved:
             return Path(resolved)
     return None
+
+
+def _normalize_ollama_base_url(value: str | None) -> str:
+    base_url = str(value or "http://127.0.0.1:11434").strip().rstrip("/")
+    if not base_url.startswith(("http://", "https://")):
+        base_url = "http://" + base_url
+    return base_url
+
+
+def _normalize_vllm_base_url(value: str | None) -> str:
+    base_url = str(value or "http://127.0.0.1:1234/v1").strip().rstrip("/")
+    if not base_url.startswith(("http://", "https://")):
+        base_url = "http://" + base_url
+    if not base_url.endswith("/v1"):
+        base_url += "/v1"
+    return base_url
+
+
+def _vllm_compatible_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Remove validation-only keywords that structured decoders may reject.
+
+    The normal parser and verifier still enforce uniqueness after generation.
+    Keeping these keywords out of the wire schema avoids a request-time failure
+    when vLLM selects a structured-output backend with a narrower JSON subset.
+    """
+    unsupported = {"uniqueItems", "contains", "minContains", "maxContains"}
+
+    def adapt(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: adapt(item)
+                for key, item in value.items()
+                if key not in unsupported
+            }
+        if isinstance(value, list):
+            return [adapt(item) for item in value]
+        return deepcopy(value)
+
+    return adapt(schema)
+
+
+def _count_removed_vllm_schema_keywords(
+    source: dict[str, Any],
+    adapted: dict[str, Any],
+) -> int:
+    def count(value: Any) -> int:
+        if isinstance(value, dict):
+            return len(value) + sum(count(item) for item in value.values())
+        if isinstance(value, list):
+            return sum(count(item) for item in value)
+        return 0
+
+    return max(0, count(source) - count(adapted))
+
+
+def _ollama_keep_alive_value(value: Any) -> int | str:
+    text = str(value if value is not None else "-1").strip()
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    return text or "5m"
+
+
+def _ollama_runtime_metadata(response: Any, *, endpoint: str, model: str) -> dict[str, Any]:
+    data = response if isinstance(response, dict) else {}
+    message = data.get("message", {}) if isinstance(data.get("message"), dict) else {}
+    return {
+        "backend": "ollama",
+        "endpoint": endpoint,
+        "model": model,
+        "done": bool(data.get("done")),
+        "done_reason": data.get("done_reason"),
+        "total_duration_ns": data.get("total_duration"),
+        "load_duration_ns": data.get("load_duration"),
+        "prompt_eval_count": data.get("prompt_eval_count"),
+        "prompt_eval_duration_ns": data.get("prompt_eval_duration"),
+        "eval_count": data.get("eval_count"),
+        "eval_duration_ns": data.get("eval_duration"),
+        "thinking": str(message.get("thinking") or ""),
+    }
+
+
+def _runtime_logs_enabled() -> bool:
+    return os.environ.get("ARC_QWEN_CAPTURE_RUNTIME_LOGS", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _resolve_llama_completion(llama_cli: Path) -> Path | None:
@@ -246,7 +621,7 @@ def _prompt(role: QwenRole, packet: dict[str, Any], config: V8Config | None = No
             "- execution_constraints.allowed_coordinate_candidate_ids is the authoritative whitelist: every ID present in it is allowed.\n"
             "- candidate_sequence may contain several candidates, but all coordinate_candidate_id values must be distinct. Each item means exactly one click on that candidate.\n"
             "- Several candidate IDs can describe the same physical location through object and relation views. Choose at most one candidate for each location_xy; those IDs are alternative descriptions of one click target, not separate probes.\n"
-            "- Never click the same candidate twice in one level attempt. A candidate may be reconsidered only after RESET, in the next attempt with the accumulated evidence.\n"
+            "- Never repeat a candidate inside this coordinate-research sequence. Research does not consume it for the later primary goal trajectory; that separate trajectory may use the candidate once based on the observed effect.\n"
             "- Avoid a candidate listed in MEMORY as having no target-local effect in the same environmental configuration.\n"
             "- Return PLAN with a grounded mechanism_hypothesis and at least one whitelisted candidate, even when confidence is low."
         )
@@ -259,7 +634,8 @@ def _prompt(role: QwenRole, packet: dict[str, Any], config: V8Config | None = No
         if "ACTION6" in allowed_action_ids:
             coordinate_action_rules = (
                 "- A coordinate action run is one point interaction: it must include coordinate_candidate_id from execution_constraints.allowed_coordinate_candidate_ids and repeat must equal 1. Never encode click count or spatial distance as repeat. Omit coordinate_candidate_id for non-coordinate runs; use separate runs for different coordinate targets.\n"
-                "- A coordinate_candidate_id and its physical location_xy may each appear at most once in the entire trajectory and must not repeat a target already listed in this attempt's coordinate evidence. Different IDs at the same location are one target. Any further click there is allowed only after RESET.\n"
+                "- One click per coordinate run does not mean one click per trajectory. When the evidence supports a multi-target configuration, include several ordered coordinate runs with distinct candidate IDs in the same complete trajectory. Do not default to a one-click hypothesis.\n"
+                "- A coordinate_candidate_id and its physical location_xy may each appear at most once in the primary trajectory. Within the current attempt, a prior research click does not consume the target: MEMORY.recent_evidence.coordinate_research_history is evidence, and the primary trajectory may use that candidate once. Different IDs at the same location are one target. This does not permit reconstructing a previous failed attempt's exact attempt_total_execution after RESET.\n"
                 "- No target-local effect is evidence against that target in the current attempt, not an invitation to retry.\n"
             )
         header = (
@@ -271,7 +647,9 @@ def _prompt(role: QwenRole, packet: dict[str, Any], config: V8Config | None = No
         task = (
             "TASK:\n"
             "This is the only semantic model call for the current level attempt. Infer the level-transition objective and return 1-3 genuinely distinct grounded hypotheses.\n"
-            "If memory.level_attempts.previous_failed_attempts is nonempty, this is a fresh RESET attempt: use its execution and verifier failure reasons, preserve confirmed mechanics, and do not repeat an unchanged failed trajectory.\n"
+            "If MEMORY.level_attempts.previous_failed_attempts is nonempty, this is a fresh RESET attempt. Read each attempt's attempt_total_execution first: it is the authoritative continuous physical trajectory of every action actually executed from attempt entry until RESET, including both research and goal-labeled actions. research_phase and executed_hypotheses are provenance views of subsets of that same trajectory, not separate environment states. A step records its coordinate candidate, cell value before/after, visible effect, and whether level progress occurred. verifier_effect_outcome is an epistemic attribution label; visible_effect_observed, target_cell_changed, observed_effect_class, and level_progress_observed are the direct outcome facts.\n"
+            "When attempt_total_execution.exact_replay_forbidden is true, do not return the same complete ordered action-and-candidate trajectory, and do not reconstruct it by relabeling or concatenating its research and goal subsets. A previously used step may appear inside a materially different trajectory when the complete sequence or configuration logic changes and memory does not mark that local step as no-effect or negative.\n"
+            "A target-local state change without level progress is evidence about the mechanic, not proof that the one-step trajectory was sufficient. Several independent local changes may need to compose one goal configuration; infer trajectory length from the evidence rather than defaulting to one action.\n"
             "Every proposed hypothesis must be a complete_candidate with the full ordered action sequence from the current state; do not return a prefix or request later re-planning.\n"
             "One hypothesis may cover several source/reference pairs and necessary intermediate configurations. Do not split a multi-object solution into separate model calls.\n"
             "For spatial placement by an observed translation action, compute each required delta from current coordinates, divide it by the observed per-action delta, and include the exact repeat count for every required axis. This arithmetic applies only to actions whose ACTION_MODEL effect explicitly contains translation; never convert a spatial delta into repeated coordinate clicks. State the arithmetic briefly in basis.\n"
@@ -288,6 +666,7 @@ def _prompt(role: QwenRole, packet: dict[str, Any], config: V8Config | None = No
             "- SCENE.component_graph partitions every frame cell into same-color 4-connected components. A component is geometric evidence, not automatically one gameplay object; multicolor objects may span several components. Use only its object_refs in response object fields.\n"
             "- SCENE.object_segmentation defines canonical planning objects. Nested same-color detail suppressed there remains visible in component_graph and CURRENT_FRAME, but is not a separate gameplay object.\n"
             "- In component_graph, shape_hash is exact translation-normalized occupancy; parent is topological enclosure. Detailed tracked-object masks are in SCENE.objects, and CURRENT_FRAME is authoritative for unlinked component detail.\n"
+            "- SCENE relation measurements describe object-to-object geometry in the current frame. current_frame_offset_xy is a static relative offset, never an action delta. Infer movement only from ACTION_MODEL.actions[action_id].motions_xy or an explicit translation effect; an empty motions_xy means no translation was observed for that action.\n"
             "- If a correspondence fact provides movable_object_id and reference_object_id, preserve those roles when choosing that fact: the movable object belongs in source_objects and the static object belongs in reference_objects.\n"
             "- source_to_reference_delta_xy is the remaining displacement from the movable object's current centroid to the reference centroid. observed_source_translation_by_action gives one-step deltas in the same coordinates.\n"
             "- Exact geometry means the occupied mask and orientation are identical. Different geometry_group_id values are not identical geometry.\n"
@@ -318,6 +697,8 @@ def _prompt(role: QwenRole, packet: dict[str, Any], config: V8Config | None = No
         "- SCENE.component_graph is a deterministic all-color topology view. Its background candidates and gameplay roles are explicitly hypotheses, not facts.",
         "- ACTION_MODEL contains verifier-observed action effects, including translations, local state changes, and action-surface transitions.",
         "- MEMORY contains chronological evidence and same-game prior-level summaries; it is cleared between games.",
+        "- MEMORY.recent_evidence.coordinate_research_history records research clicks separately from goal execution, including the clicked cell value before and after each probe.",
+        "- MEMORY.level_attempts.previous_failed_attempts is ordered retry memory. attempt_total_execution is the authoritative phase-independent sequence of all physical actions between attempt entry and RESET; research_phase and executed_hypotheses are only provenance views into that same sequence.",
         "- For object shape, shape_geometry.occupied_mask_rows and SCENE.exact_geometry_groups are authoritative for exact geometry and orientation.",
         "- Same bbox size, area, or fill_ratio does not mean same shape; exact shape correspondence requires the same occupied mask/orientation or an explicit same_shape relation.",
         "- You may propose action IDs and candidate trajectories inside the JSON response.",
@@ -566,6 +947,7 @@ def _compact_v87_packet(out: dict[str, Any], strategy: str) -> dict[str, Any]:
             keep = 8 if strategy == "aggressive" else 4
             evidence["successful_steps"] = (evidence.get("successful_steps") or [])[-keep:]
             evidence["failed_or_irrelevant_steps"] = (evidence.get("failed_or_irrelevant_steps") or [])[-keep:]
+            evidence["coordinate_research_history"] = (evidence.get("coordinate_research_history") or [])[-keep:]
             evidence["open_questions"] = (evidence.get("open_questions") or [])[-keep:]
         attempts = memory.get("level_attempts")
         if isinstance(attempts, dict):
@@ -1236,6 +1618,12 @@ def _write_qwen_trace_input(role: QwenRole, packet: dict[str, Any], prompt: str,
         (base.with_suffix(".prompt.txt")).write_text(prompt, encoding="utf-8", newline="\n")
         meta = {
             "role": role.value,
+            "backend": config.qwen_backend,
+            "model": (
+                config.qwen_ollama_model
+                if config.qwen_backend == "ollama"
+                else config.qwen_model_path
+            ),
             "game_id": state.get("game_id", packet.get("game_id")),
             "level_index": state.get("level_index", packet.get("level_index")),
             "step_index": state.get("step_index", packet.get("step_index")),
@@ -1245,6 +1633,11 @@ def _write_qwen_trace_input(role: QwenRole, packet: dict[str, Any], prompt: str,
             "max_input_tokens": config.qwen_max_input_tokens,
             "max_output_tokens": config.qwen_max_output_tokens,
             "timeout_seconds": config.qwen_timeout_seconds,
+            "runtime_logs_enabled": (
+                _runtime_logs_enabled()
+                if config.qwen_backend in {"qwen_local", "llama_cli"}
+                else False
+            ),
             "command_without_prompt_file": cmd,
         }
         (base.with_suffix(".meta.json")).write_text(json.dumps(meta, ensure_ascii=False, sort_keys=False, indent=2, default=str), encoding="utf-8")
@@ -1253,7 +1646,16 @@ def _write_qwen_trace_input(role: QwenRole, packet: dict[str, Any], prompt: str,
         return None
 
 
-def _write_qwen_trace_output(base: Path | None, stdout: str, stderr: str, extracted: dict[str, Any], status: str, *, elapsed_seconds: float | None = None) -> None:
+def _write_qwen_trace_output(
+    base: Path | None,
+    stdout: str,
+    stderr: str,
+    extracted: dict[str, Any],
+    status: str,
+    *,
+    elapsed_seconds: float | None = None,
+    runtime_metadata: dict[str, Any] | None = None,
+) -> None:
     if base is None:
         return
     try:
@@ -1271,6 +1673,7 @@ def _write_qwen_trace_output(base: Path | None, stdout: str, stderr: str, extrac
             "coordinate_plan_step_count": len(extracted.get("candidate_sequence") or []) if isinstance(extracted, dict) else 0,
             "decision": extracted.get("decision") if isinstance(extracted, dict) else None,
             "extracted": extracted if isinstance(extracted, dict) else {},
+            "runtime": dict(runtime_metadata or {}),
         }
         base.with_suffix(".output.json").write_text(json.dumps(summary, ensure_ascii=False, sort_keys=False, indent=2, default=str), encoding="utf-8")
     except Exception:

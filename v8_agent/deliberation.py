@@ -17,13 +17,19 @@ def choose_qwen_role(
 ) -> QwenRole | None:
     if not config.enable_qwen or config.qwen_backend == "disabled":
         return None
-    if not memory.action_effect_probe_complete(snapshot, config):
+    research = memory.action_research_status(snapshot)
+    if research["missing_simple_action_ids"]:
+        return None
+    if bank.has_executable_coordinate_candidate(snapshot):
         return None
     has_candidate = bank.has_executable_candidate(snapshot)
     urgent_no_candidate = not has_candidate
-    if snapshot.coordinate_action_ids and memory.coordinate_research_needed(state.level_index):
+    if research["missing_coordinate_action_ids"]:
         if can_call_qwen_role(QwenRole.COORDINATE, state.level_index, state.step_index, budget, config, ignore_spacing=urgent_no_candidate):
             return QwenRole.COORDINATE
+        return None
+    if research["missing_action_ids"]:
+        return None
     if can_call_qwen_role(QwenRole.PRIMARY, state.level_index, state.step_index, budget, config, ignore_spacing=urgent_no_candidate):
         return QwenRole.PRIMARY
     return None

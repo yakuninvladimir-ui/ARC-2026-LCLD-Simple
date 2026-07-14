@@ -5,7 +5,7 @@ from typing import Any
 
 from .component_graph import build_component_graph
 from .config import V8Config
-from .memory import ACTION_EFFECT_PROBE_IDS
+from .memory import is_coordinate_research_source
 from .observe import stable_hash
 from .types import ARGALiteSnapshot, MemoryEvent, QwenRole, Relevance
 
@@ -44,10 +44,16 @@ class QwenPacketBuilder:
         raw_objects = _annotate_object_motion(raw_objects, raw_control_model)
         all_geometry_groups = _annotate_object_geometry(raw_objects)
         focus_ids = _focus_object_ids(raw_objects, all_geometry_groups, raw_control_model, all_candidates, role, config)
+        coordinate_execution_allowed = bool(set(allowed_action_ids) & set(snapshot.coordinate_action_ids))
+        if role is QwenRole.COORDINATE or coordinate_execution_allowed:
+            focus_ids.update(
+                str(item["object_id"])
+                for item in all_candidates
+                if item.get("object_id") is not None
+            )
         focus_objects = [item for item in raw_objects if str(item.get("id")) in focus_ids]
         focus_relations = _focus_relations(all_relations, focus_ids, config)
         focus_relation_ids = {str(item.get("id")) for item in focus_relations}
-        coordinate_execution_allowed = bool(set(allowed_action_ids) & set(snapshot.coordinate_action_ids))
         focus_candidates = [
             item for item in all_candidates
             if (item.get("object_id") is None or str(item.get("object_id")) in focus_ids)
@@ -83,6 +89,11 @@ class QwenPacketBuilder:
                     "suppressed_nested_component_view_count": len(nested_component_view_ids),
                     "suppressed_views_retained_in_component_graph": bool(config.include_component_graph_in_qwen_packet),
                 },
+                "relation_measurement_contract": (
+                    "Relation offsets describe only the relative geometry of two objects in CURRENT_FRAME. "
+                    "They are never action effects or per-action motion vectors. Action-caused movement is "
+                    "established only by ACTION_MODEL.actions[*].motions_xy or an explicit translation effect."
+                ),
                 "priority_facts_not_goals": priority_facts,
                 "control_groups": control_groups,
                 "control_state_transition_candidates": control_state_candidates,
@@ -127,19 +138,10 @@ class QwenPacketBuilder:
 def qwen_planning_ready(snapshot: ARGALiteSnapshot, memory: "GameMemory", role: QwenRole = QwenRole.PRIMARY) -> bool:
     if role is QwenRole.COORDINATE:
         return bool(snapshot.coordinate_action_ids and snapshot.coordinate_targets)
-    required_actions = tuple(
-        action_id
-        for action_id in _planning_action_ids(snapshot)
-        if action_id in ACTION_EFFECT_PROBE_IDS and action_id not in set(snapshot.coordinate_action_ids)
-    )
+    required_actions = memory.required_action_research_ids(snapshot)
     if not required_actions:
         return False
-    known = {
-        record.action_id
-        for record in getattr(memory, "action_effects", {}).values()
-        if getattr(record, "confidence", 0.0) >= 0.45
-    }
-    return all(action_id in known for action_id in required_actions)
+    return not memory.action_research_status(snapshot)["missing_action_ids"]
 
 
 def _state(snapshot: ARGALiteSnapshot) -> dict[str, Any]:
@@ -1413,7 +1415,7 @@ def _relations(snapshot: ARGALiteSnapshot, allowed_object_ids: set[str], config:
 def _relation_packet(relation: Any, object_by_id: dict[str, Any]) -> dict[str, Any]:
     source = object_by_id.get(relation.a)
     target = object_by_id.get(relation.b)
-    delta_xy = _object_translation_xy(source, target)
+    delta_xy = _object_relative_offset_xy(source, target)
     metric_value = None if relation.metric_value is None else round(float(relation.metric_value), 3)
     measurements: dict[str, Any] = {}
     relation_type = str(relation.relation_type)
@@ -1421,7 +1423,7 @@ def _relation_packet(relation: Any, object_by_id: dict[str, Any]) -> dict[str, A
     if relation_type in {"same_shape", "translated_shape"}:
         relation_type = "same_shape"
         if delta_xy is not None:
-            measurements["translation_xy"] = delta_xy
+            measurements["current_frame_offset_xy"] = delta_xy
         if metric_value is not None:
             measurements["centroid_distance"] = metric_value
     elif relation_type == "aligned_row":
@@ -1477,7 +1479,7 @@ def _relation_canonical_key(item: dict[str, Any]) -> tuple[Any, ...]:
     return (relation_type, source, target)
 
 
-def _object_translation_xy(source: Any, target: Any) -> list[float] | None:
+def _object_relative_offset_xy(source: Any, target: Any) -> list[float] | None:
     if source is None or target is None:
         return None
     try:
@@ -2031,10 +2033,50 @@ def _recent_evidence(
         })
     return {
         "mechanics_probe_summary": mechanics_probe_summary[-config.max_memory_notes_in_packet :],
+        "coordinate_research_history": _coordinate_research_history(memory, snapshot, config),
         "successful_steps": successful[-config.max_memory_notes_in_packet :],
         "failed_or_irrelevant_steps": failed[-config.max_memory_notes_in_packet :],
         "open_questions": _open_questions(memory, config),
     }
+
+
+def _coordinate_research_history(memory: "GameMemory", snapshot: ARGALiteSnapshot, config: V8Config) -> list[dict[str, Any]]:
+    history = []
+    for record in getattr(memory, "action_memory_records", []):
+        if not _record_matches_snapshot_level(record, snapshot):
+            continue
+        if not is_coordinate_research_source(record.get("source")):
+            continue
+        candidate_id = record.get("coordinate_candidate_id")
+        coordinate_xy = record.get("coordinate_xy")
+        if candidate_id is None and not coordinate_xy:
+            continue
+        color_delta = record.get("changed_color_delta") if isinstance(record.get("changed_color_delta"), dict) else {}
+        palette_changes = []
+        for change in record.get("object_deltas") or []:
+            if not isinstance(change, dict) or not change.get("palette_changed"):
+                continue
+            palette_changes.append({
+                "object_id": change.get("object_id"),
+                "before_palette_ids": change.get("before_colors"),
+                "after_palette_ids": change.get("after_colors"),
+            })
+        item = {
+            "step_index": record.get("step_index"),
+            "action_id": record.get("action_id"),
+            "candidate_id": candidate_id,
+            "coordinate_xy": coordinate_xy,
+            "clicked_cell_before": record.get("coordinate_cell_before"),
+            "clicked_cell_after": record.get("coordinate_cell_after"),
+            "effect_outcome": record.get("effect_outcome"),
+            "changed_cell_count": record.get("changed_cell_count"),
+            "changed_color_transitions": color_delta.get("transitions") or {},
+            "object_palette_changes": palette_changes[:4],
+            "available_actions_before": record.get("available_actions_before") or [],
+            "available_actions_after": record.get("available_actions_after") or [],
+        }
+        history.append({key: value for key, value in item.items() if value not in (None, [], {})})
+    return history[-config.max_action_memory_records_in_packet :]
 
 
 def _action_surface_transitions(memory: "GameMemory", snapshot: ARGALiteSnapshot, config: V8Config, allowed_object_ids: set[str] | None = None) -> list[dict[str, Any]]:
@@ -2184,7 +2226,11 @@ def _level_attempt_context(memory: "GameMemory", snapshot: ARGALiteSnapshot, con
     ]
     return {
         "current_attempt_index": int(getattr(memory, "current_attempt_index", lambda _level: 0)(snapshot.level_index)),
-        "policy": "one primary semantic call per attempt; when latest-frame coordinate research is required, one coordinate call precedes primary; RESET starts a new attempt with retained game memory",
+        "policy": (
+            "one primary semantic call per attempt; when latest-frame coordinate research is required, one coordinate call precedes primary; "
+            "RESET starts a new attempt with retained memory; attempt_total_execution is the authoritative phase-independent ordered physical trajectory; "
+            "research and goal labels never imply an intervening RESET; an unchanged failed complete trajectory is not executable again"
+        ),
         "previous_failed_attempts": records[-max(1, int(config.max_memory_notes_in_packet)) :],
     }
 
@@ -2364,8 +2410,6 @@ def _effect_text(outcome: str) -> str:
 
 
 def _mechanism_text(action_id: str, outcome: str) -> str:
-    if action_id in ACTION_EFFECT_PROBE_IDS:
-        return f"simple action with verifier-classified outcome: {outcome}"
     return f"available action with verifier-classified outcome: {outcome}"
 
 

@@ -1,107 +1,105 @@
 # ARC-2026 LCLD Simple
 
-Compact object-centric agent for the ARC Prize 2026 / ARC-AGI-3 interactive
-competition. This repository contains the V8.3 competition source snapshot,
-its Kaggle wrapper and notebook builder, and the architectural and engineering
-specifications used to develop it.
+Current source snapshot of the LCLD Qwen agent for the ARC Prize 2026 / ARC-AGI-3 interactive competition.
 
-The repository intentionally does **not** include a Qwen model, `llama.cpp`
-binaries, ARC environment files, Kaggle datasets, or generated notebooks.
+The repository contains the agent core, reproducible Kaggle notebook builder, competition wrapper sources, specifications, tests, and validation notes. It intentionally excludes model weights, ARC environment files, vLLM wheels, `llama.cpp`, generated notebooks, Kaggle datasets, and local traces.
 
 ## Architecture
-
-The runtime keeps the semantic layer deliberately small:
 
 ```text
 official frame and available actions
   -> grid/object parsing and component graph
   -> action-effect and action-surface memory
-  -> one bounded Qwen proposal
-  -> trajectory normalization and verifier checks
+  -> bounded Qwen hypothesis and complete trajectory proposal
+  -> trajectory normalization and lightweight verification
   -> deterministic execution
-  -> official transition ingestion and memory update
+  -> official transition ingestion and retry memory
 ```
 
-Qwen proposes complete action trajectories. The agent retains control of the
-official action loop, validates action availability and trajectory grounding,
-tracks effects against the current frame, and records failures for a later
-level attempt. There is no general-purpose DSL, binder, or autonomous symbolic
-planner in this version.
+Qwen generates hypotheses and complete action trajectories. The agent owns action research, validates current action availability and coordinate targets, executes accepted trajectories, observes every official transition, and retains failure evidence across level resets. There is no general-purpose DSL or autonomous symbolic planner.
+
+## Competition Profile
+
+- accelerator: one NVIDIA RTX6000;
+- model: `vrfai/Qwen3.6-27B-FP8`;
+- model dataset: `driessmit1/vrfai-qwen3-6-27b-fp8-hf-snapshot`;
+- vLLM dataset: `driessmit1/arc3-vllm-h100-wheelhouse-v3`;
+- one persistent vLLM server, tensor parallel size 1, maximum one sequence;
+- model context / maximum input / maximum output: `98304 / 65536 / 12288`;
+- non-thinking requests with structured JSON output;
+- Qwen timeout: 500 seconds;
+- game wall-clock limit: 6000 seconds;
+- maximum 200 accepted actions per game;
+- maximum four attempts per level, with no per-level action limit;
+- calls per level: primary 1, coordinate 1, reserve 0, total 2;
+- no notebook-wide competition deadline.
+
+The model and wheelhouse datasets are referenced by the generated Kaggle metadata but are not redistributed here.
+
+## Competition Lifecycle
+
+Phase A performs static validation without loading the model and writes the required nonempty validation parquet only outside a competition rerun.
+
+Phase B follows this order:
+
+```text
+remove stale parquet
+  -> start vLLM
+  -> real structured-output model smoke
+  -> create one shared scorecard
+  -> make game
+  -> unconditional initial RESET
+  -> act -> env.step -> observe_action_result
+  -> one RESET after GAME_OVER when another attempt is allowed
+  -> close scorecard after all games
+  -> validate the gateway-generated nonempty parquet
+```
+
+Phase B never writes a fallback `submission.parquet`. Any model, gateway, game, or agent exception abandons the scorecard without calling `close_scorecard`, removes any parquet artifact, prints the vLLM log tail, and re-raises. This intentionally turns infrastructure failures into failed notebook runs instead of zero-result submissions.
+
+The active competition path uses generated `kaggle_agent.py` and `submission.py` compatibility modules. It does not use `agent/my_agent.py`.
 
 ## Repository Layout
 
 ```text
-agent/my_agent.py                    competition-compatible adapter
-v8_agent/                            active V8.3 runtime
-build_notebook.py                    offline Kaggle notebook builder
+v8_agent/                            active agent runtime
+notebook_wrapper/                    Phase A/B and vLLM wrapper sources
+build_notebook.py                    production notebook builder
+tests/                               structural and behavioral regression suite
 ARCHITECTURAL_SPECIFICATION_V6_2.md  baseline architecture
 ENGINEERING_SPECIFICATION_V6_2.md    baseline engineering contract
 ARCHITECTURAL_SPECIFICATION_V8_3.md  current architecture
 ENGINEERING_SPECIFICATION_V8_3.md    current engineering contract
-CHANGELOG_V8_3.md                    V8.3 change summary
+CHANGELOG_V8_3.md                    implementation history
+VALIDATION_V8_3.txt                  frozen competition contract
+COMPETITION_WRAPPER_AUDIT_2026-07-15.md
 ```
-
-## Competition Profile
-
-The checked-in notebook builder is configured for:
-
-- Kaggle accelerator: two NVIDIA T4 GPUs;
-- Qwen execution: `CUDA0,CUDA1`, layer split `1,1`;
-- context/input/output limits: `98304 / 65536 / 4096` tokens;
-- Qwen timeout: 500 seconds per call;
-- game timeout: 5000 seconds;
-- no per-level timeout;
-- call budgets supplied by the competition wrapper: primary 1, coordinate 1,
-  reserve 1, total 3 per level.
-
-The external runtime dataset must provide a compatible Qwen GGUF model and a
-Linux `llama-cli` build with its adjacent CUDA libraries. Those assets have
-their own licenses and are not covered or redistributed by this repository.
 
 ## Build
 
-Python 3.12 or newer is recommended. Building the notebook itself uses only the
-Python standard library:
+Python 3.12 or newer is recommended.
 
 ```bash
 python build_notebook.py
 ```
 
-The command creates:
+Output:
 
 ```text
 notebooks/arc-prize-2026-lcld-qwen.ipynb
 notebooks/kernel-metadata.json
 ```
 
-Before publishing the notebook on Kaggle, configure the runtime dataset named
-in `build_notebook.py` or change it to your own dataset containing the model
-and `llama-cli`. The ARC-AGI-3 competition environment is supplied by Kaggle at
-runtime and is not part of this source tree.
+The generated metadata attaches the ARC Prize competition, the Tufa vLLM wheelhouse, and the Qwen FP8 snapshot. Generated artifacts remain ignored by Git.
 
-## Runtime Contract
+## Test
 
-The direct competition loop uses `ARC_AGI_Agent` from `agent/my_agent.py`.
-Every accepted action must be followed by ingestion of the official result:
-
-```text
-act(before) -> environment.step(action) -> observe_action_result(after)
+```bash
+python -m pytest tests -q
 ```
 
-Available actions are read from the latest official frame. Coordinate action
-rules are included in the Qwen packet only when `ACTION6` is available.
-`ACTION7` is treated as semantic undo and is not used for routine probing.
-
-## Status
-
-This is an experimental competition agent. Structural tests and local harness
-runs do not establish an official score or compatibility with every hidden
-game. No model weights or benchmark results are bundled with this snapshot.
+The current snapshot passes 106 tests and compiles all generated notebook cells and embedded Python payload files. This does not replace an actual Kaggle RTX6000/gateway run.
 
 ## License
 
-The source code and documentation in this repository are released under the
-[MIT License](LICENSE). External models, `llama.cpp`, ARC-AGI-3 environments,
-and Kaggle competition assets are not included and remain subject to their own
-terms.
-
+Repository source and documentation are available under the [MIT License](LICENSE). The generated notebook header also carries the author's CC-BY-4.0 attribution notice. External models, ARC environments, Kaggle assets, and the Tufa vLLM wheelhouse are not included and remain under their respective licenses.

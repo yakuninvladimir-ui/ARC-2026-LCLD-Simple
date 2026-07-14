@@ -1,5 +1,9 @@
 [project]
-name = "arc-2026-lcld-simple"
+name = "arc-v8-3-agent"
 version = "8.3.0"
-description = "Compact Qwen-assisted ARC-AGI-3 competition agent"
+description = "ARC-AGI-3 compact verified hypothesis agent"
 requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

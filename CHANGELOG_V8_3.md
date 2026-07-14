@@ -1,5 +1,27 @@
 # V8.3 Changelog
 
+## 2026-07-15 competition fail-fast audit
+
+- Re-audited the generated notebook against the Tufa Qwen/vLLM launcher and the standard `ARC-AGI-3-Agents` Arcade lifecycle.
+- Moved all real-model readiness checks before scorecard creation and kept one explicit scorecard for all competition games.
+- Made every Phase-B game exception fatal instead of continuing to a zero-result scorecard close.
+- Removed scorecard close from the fatal handler; the handler now deletes any parquet before diagnostics and re-raises.
+- Added post-close validation requiring a nonempty standard competition parquet.
+- Preserved complete session telemetry in the generated shim and required either a Qwen call or observed level progress for every normally completed game loop.
+- Removed parent-process CUDA cache initialization so the persistent vLLM subprocess remains the only GPU owner.
+- Replaced the external `curl` gateway dependency with Tufa-style in-process polling.
+- Sanitized validator-only JSON-schema keywords from vLLM wire schemas while retaining normal response validation.
+
+## 2026-07-14 Qwen FP8 competition runtime
+
+- Synchronized the competition core with the latest local `v8_agent` implementation.
+- Replaced the retired GPT-OSS experiment with `vrfai/Qwen3.6-27B-FP8` served by one persistent vLLM process using the Tufa wheelhouse.
+- Set context/input/output to `98304 / 65536 / 12288`, Qwen timeout to 500 seconds, and game timeout to 6000 seconds.
+- Limited each game to 200 accepted actions and each level to four attempts, with no per-level action limit.
+- Kept the Tufa-derived initial-RESET, GAME_OVER-reset, transition-observation, and scorecard lifecycle.
+- Added a Phase-B non-thinking strict-JSON model smoke before scorecard creation; Phase A remains static.
+- Retired the active GPT-OSS builder, wrapper, and notebook into `backups/gpt_oss_retired_20260714`.
+
 ## 2026-07-12 semantic/runtime freeze
 
 - Replaced the overloaded semantic packet with exact geometry, state-scoped action effects, current/noncurrent control groups, synchronized raw visual transitions, and explicit action-surface chronology.

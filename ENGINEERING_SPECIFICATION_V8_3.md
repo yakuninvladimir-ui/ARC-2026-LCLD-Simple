@@ -11,7 +11,7 @@ Target properties:
 - Python 3.12+ compatible;
 - offline competition execution;
 - deterministic parsing and hashing;
-- optional local Qwen through `llama-cli`;
+- local Qwen through Ollama or `llama-cli`, and competition Qwen through vLLM;
 - no real model required by tests;
 - one active path, with compatibility shims kept minimal;
 - generated notebook below the competition size limit;
@@ -70,9 +70,14 @@ The public configuration dataclass remains named `V8Config` for package compatib
 
 ```text
 enable_qwen
-qwen_backend: disabled | fake | qwen_local | llama_cli
+qwen_backend: disabled | fake | ollama | vllm | qwen_local | llama_cli
 qwen_model_path
 qwen_llama_cli_path
+qwen_ollama_base_url
+qwen_ollama_model
+qwen_vllm_base_url
+qwen_vllm_api_key
+qwen_vllm_model
 qwen_temperature
 qwen_seed
 qwen_timeout_seconds
@@ -118,20 +123,19 @@ information_gain_min_threshold
 ### 2.4 Competition
 
 ```text
-max_actions_per_game
 game_wall_clock_limit_seconds
 reset_on_game_over = true
 max_game_over_resets_per_game = 0
 max_game_over_resets_per_level = 0
 ```
 
-The reset-limit fields are compatibility telemetry and must not terminate gameplay. Zero means unlimited.
+The reset-limit fields are compatibility telemetry and must not terminate gameplay. Zero means unlimited. The competition wrapper has no action-count cap; termination is based on game completion, the game wall clock, or a fatal gateway error.
 
 Frozen competition defaults:
 
 ```text
-qwen_timeout_seconds = 350
-game_wall_clock_limit_seconds = 5000
+qwen_timeout_seconds = 500
+game_wall_clock_limit_seconds = 6000
 per-level wall-clock deadline = disabled
 competition/global wall-clock deadline = disabled
 ```
@@ -440,7 +444,11 @@ v8.3.coordinate_output
 
 ### 11.4 Invocation
 
-`llama-cli` command includes:
+The competition backend posts one strict JSON-schema request to the persistent
+vLLM `/v1/chat/completions` endpoint. It sends
+`chat_template_kwargs.enable_thinking=false`; the server is started once with
+the Qwen3 reasoning parser and prefix caching. The compatibility `llama-cli`
+backend includes:
 
 ```text
 --model
@@ -513,7 +521,7 @@ delegate.observe_action_result(after_observation)
 
 Initial start reset may be emitted directly by the loop because no agent pending token exists yet.
 
-On `GAME_OVER`, the loop does not break. It calls the delegate, which emits reset. The loop stops on environment success, wall-clock timeout, configured action cap, or fatal error.
+On `GAME_OVER`, the loop does not break. It calls the delegate, which emits one reset before another agent decision. The loop stops on environment success, wall-clock timeout, or fatal error.
 
 Before returning, `pending_official_transition` must be false. When all ordinary candidates are exhausted, the session uses a least-used internal liveness revisit rather than raising; this path remains verifier-observed and is exposed in telemetry.
 

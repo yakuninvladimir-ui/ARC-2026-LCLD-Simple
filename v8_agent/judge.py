@@ -4,6 +4,7 @@ from collections import Counter
 from typing import Any
 
 from .config import V8Config
+from .memory import is_coordinate_research_source
 from .types import (
     ARGALiteSnapshot,
     Attribution,
@@ -39,15 +40,16 @@ class PreflightJudge:
             valid_candidates = {c.candidate_id for c in snapshot.coordinate_targets}
             if candidate_action.coordinate_candidate_id is not None and candidate_action.coordinate_candidate_id not in valid_candidates:
                 return PreflightResult(False, Validity.INVALID, "coordinate_candidate_unknown")
-            if memory.coordinate_candidate_clicked_this_attempt(
-                candidate_action.action_id,
-                candidate_action.coordinate_candidate_id,
-                candidate_action.x,
-                candidate_action.y,
-            ):
-                return PreflightResult(False, Validity.INVALID, "coordinate_candidate_already_clicked_this_attempt")
-            if memory.coordinate_probe_count(snapshot.level_index) >= config.max_coordinate_probes_per_level and not candidate_action.allow_exhaustion_revisit:
-                return PreflightResult(False, Validity.INVALID, "coordinate_probe_budget_exceeded")
+            if is_coordinate_research_source(candidate_action.source):
+                if memory.coordinate_candidate_clicked_this_attempt(
+                    candidate_action.action_id,
+                    candidate_action.coordinate_candidate_id,
+                    candidate_action.x,
+                    candidate_action.y,
+                ):
+                    return PreflightResult(False, Validity.INVALID, "coordinate_research_candidate_already_clicked_this_attempt")
+                if memory.coordinate_probe_count(snapshot.level_index) >= config.max_coordinate_probes_per_level and not candidate_action.allow_exhaustion_revisit:
+                    return PreflightResult(False, Validity.INVALID, "coordinate_probe_budget_exceeded")
             if (
                 memory.is_coordinate_no_effect_suppressed(candidate_action.action_id, candidate_action.coordinate_candidate_id, int(candidate_action.x), int(candidate_action.y), snapshot.grid_hash)
                 and not candidate_action.allow_exhaustion_revisit
@@ -249,6 +251,10 @@ class TransitionJudge:
             "error_delta": error_delta,
             "object_deltas": object_deltas,
         }
+        if action.x is not None and action.y is not None:
+            observed_delta["coordinate_xy"] = [int(action.x), int(action.y)]
+            observed_delta["coordinate_cell_before"] = _grid_char(before.full_grid_hex_rows, int(action.x), int(action.y))
+            observed_delta["coordinate_cell_after"] = _grid_char(after.full_grid_hex_rows, int(action.x), int(action.y))
         if contract is not None:
             observed_delta["target_signature"] = contract.target_signature
             observed_delta["target_object_ids"] = list(contract.target_object_ids)
@@ -311,8 +317,6 @@ def _changed_color_delta(before_rows: tuple[str, ...], after_rows: tuple[str, ..
     after_hist: Counter[str] = Counter()
     transitions: Counter[tuple[str, str]] = Counter()
     for x, y in cells:
-        b = before_rows[y][x] if y < len(before_rows) and x < len(before_rows[y]) else "∅"
-        a = after_rows[y][x] if y < len(after_rows) and x < len(after_rows[y]) else "∅"
         b = _grid_char(before_rows, x, y)
         a = _grid_char(after_rows, x, y)
         before_hist[b] += 1

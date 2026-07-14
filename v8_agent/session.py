@@ -13,15 +13,30 @@ from .hypothesis_bank import HypothesisBank
 from .judge import PreflightJudge, TransitionJudge
 from .llm import QwenBackendError, QwenClient
 from .logging import runtime_log
-from .memory import GameMemory
+from .memory import GameMemory, is_coordinate_research_source
 from .observe import stable_hash
 from .policy import Policy
 from .qwen_packet import QwenPacketBuilder, QwenPacketNotReady
-from .qwen_roles import can_call_qwen_role, record_qwen_call
+from .qwen_roles import record_qwen_call
 from .types import CandidateAction, PendingAction, QwenBudgetState, QwenRole
 
 
 _ATTEMPT_RETRY_RESET_SOURCES = {"game_over_level_reset", "failed_attempt_reset"}
+
+
+class LevelRunLimitReached(RuntimeError):
+    """Normal orchestration terminal for an exhausted level budget."""
+
+    def __init__(self, reason_code: str, *, level_index: int, attempt_index: int, action_count: int, limit: int) -> None:
+        self.reason_code = str(reason_code)
+        self.level_index = int(level_index)
+        self.attempt_index = int(attempt_index)
+        self.action_count = int(action_count)
+        self.limit = int(limit)
+        super().__init__(
+            f"{self.reason_code}: level={self.level_index} attempt={self.attempt_index} "
+            f"actions={self.action_count} limit={self.limit}"
+        )
 
 
 class GameSession:
@@ -46,6 +61,8 @@ class GameSession:
         self._game_over_resets_this_game = 0
         self._game_over_resets_by_level: dict[int, int] = defaultdict(int)
         self._attempt_index_by_level: dict[int, int] = defaultdict(int)
+        self._action_count_by_level: dict[int, int] = defaultdict(int)
+        self._terminal_level_limit: dict[str, Any] = {}
         self._observed_transition_ingestions = 0
         self._observed_transition_duplicate_skips = 0
         self._last_committed_token: str | None = None
@@ -83,16 +100,21 @@ class GameSession:
             return CandidateAction("RESET", reason="terminal success observed; outer loop should stop", source="terminal_guard").to_arc_action()
         if state.state_name in {"NOT_STARTED", "NOT_PLAYED"}:
             return self._emit(snapshot, CandidateAction("RESET", reason="initial environment start", source="initial_reset"))
+        self._raise_if_level_action_limit(snapshot)
 
         role = choose_qwen_role(state, snapshot, self.memory, self.bank, self.budget, self.config, is_new_level=is_new_level)
         if role is None and self.config.enable_qwen and self.config.qwen_backend != "disabled":
+            research = self.memory.action_research_status(snapshot)
             runtime_log(
                 "qwen_no_call",
                 level=state.level_index,
                 step=state.step_index,
                 is_new_level=is_new_level,
                 coordinate_action_count=len(snapshot.coordinate_action_ids),
-                coordinate_research_needed=bool(snapshot.coordinate_action_ids and self.memory.coordinate_research_needed(state.level_index)),
+                coordinate_research_needed=bool(research["missing_coordinate_action_ids"]),
+                required_action_ids=research["required_action_ids"],
+                researched_action_ids=research["researched_action_ids"],
+                missing_action_ids=research["missing_action_ids"],
                 has_executable_candidate=self.bank.has_executable_candidate(snapshot),
                 recent_progress_positive=self.memory.recent_progress_positive(),
                 recent_unknown_or_irrelevant_count=self.memory.recent_unknown_or_irrelevant_count(),
@@ -101,26 +123,6 @@ class GameSession:
             )
         if role is not None:
             self._call_qwen_role(role, snapshot, state)
-            if (
-                role is QwenRole.COORDINATE
-                and not self.bank.has_executable_candidate(snapshot)
-                and can_call_qwen_role(
-                    QwenRole.PRIMARY,
-                    state.level_index,
-                    state.step_index,
-                    self.budget,
-                    self.config,
-                    ignore_spacing=True,
-                )
-            ):
-                runtime_log(
-                    "coordinate_primary_handoff",
-                    level=state.level_index,
-                    step=state.step_index,
-                    attempt_index=self._attempt_index_by_level.get(state.level_index, 0),
-                    reason="coordinate_call_produced_no_executable_probe",
-                )
-                self._call_qwen_role(QwenRole.PRIMARY, snapshot, state)
 
         candidate = None
         preflight = None
@@ -128,6 +130,7 @@ class GameSession:
         for _ in range(max(8, self.config.max_active_hypotheses_in_packet + 8)):
             candidate = self.policy.choose_action(snapshot, self.memory, self.bank, self.explorer, self.config)
             if candidate is None:
+                research = self.memory.action_research_status(snapshot)
                 self._last_action_selection = {
                     "verifier_exhausted": True,
                     "fallback_enabled": False,
@@ -137,6 +140,7 @@ class GameSession:
                     "coordinate_queue_count": len(self.bank.coordinate_test_queue),
                     "confirmed_rule_count": len(self.bank.confirmed_rules),
                     "unprobed_actions": self.memory.unprobed_action_effect_ids(snapshot, self.config),
+                    "missing_action_ids": research["missing_action_ids"],
                     "qwen_calls_this_game": self.budget.calls_this_game,
                     "qwen_total_calls_this_level": self.budget.total_calls_by_level.get(state.level_index, 0),
                 }
@@ -149,6 +153,7 @@ class GameSession:
                     coordinate_queue_count=len(self.bank.coordinate_test_queue),
                     confirmed_rule_count=len(self.bank.confirmed_rules),
                     unprobed_actions=self.memory.unprobed_action_effect_ids(snapshot, self.config),
+                    missing_action_ids=research["missing_action_ids"],
                 )
                 if self._can_reset_failed_attempt(state.level_index):
                     return self._emit_attempt_reset(snapshot, "no_executable_verified_hypothesis")
@@ -204,12 +209,17 @@ class GameSession:
             "qwen_reserve_calls_by_level": dict(self.budget.reserve_calls_by_level),
             "qwen_total_calls_by_level": dict(self.budget.total_calls_by_level),
             "level_attempt_index_by_level": dict(self._attempt_index_by_level),
+            "action_count_by_level": dict(self._action_count_by_level),
+            "max_level_attempts": self.config.max_level_attempts,
+            "max_actions_per_level": self.config.max_actions_per_level,
+            "terminal_level_limit": dict(self._terminal_level_limit),
             "level_attempt_records": list(self.memory.level_attempt_records),
             "confirmed_rule_count": len(self.bank.confirmed_rules),
             "semantic_queue_count": len(self.bank.semantic_test_queue),
             "coordinate_queue_count": len(self.bank.coordinate_test_queue),
             "fallback_queue_count": len(self.bank.fallback_exploration_queue),
             "action_selection": dict(self._last_action_selection),
+            "latest_action_research": self.memory.action_research_status(self._latest_snapshot) if self._latest_snapshot is not None else {},
         }
 
     def _prepare_snapshot(self, raw_observation: Mapping[str, Any]):
@@ -296,6 +306,8 @@ class GameSession:
             )
             self.bank.reset_level(state.level_index)
             self._attempt_index_by_level[state.level_index] = 0
+            self._action_count_by_level[state.level_index] = 0
+            self._terminal_level_limit = {}
             self._reset_qwen_attempt_budget(state.level_index)
             self.memory.begin_level_attempt(state.level_index, 0, retry=False)
             self._last_level_index = state.level_index
@@ -311,6 +323,14 @@ class GameSession:
 
     def _begin_retry_attempt(self, level_index: int, step_index: int, reset_source: str) -> None:
         attempt_index = self._attempt_index_by_level.get(level_index, 0) + 1
+        if self.config.max_level_attempts > 0 and attempt_index >= self.config.max_level_attempts:
+            raise LevelRunLimitReached(
+                "level_attempt_limit_reached",
+                level_index=level_index,
+                attempt_index=attempt_index,
+                action_count=self._action_count_by_level.get(level_index, 0),
+                limit=self.config.max_level_attempts,
+            )
         self._attempt_index_by_level[level_index] = attempt_index
         self._reset_qwen_attempt_budget(level_index)
         self.bank.reset_level(level_index)
@@ -345,6 +365,16 @@ class GameSession:
             qwen_calls=self.budget.total_calls_by_level.get(level_index, 0),
             verifier_feedback=feedback,
         )
+        if self.config.max_level_attempts > 0 and attempt_index + 1 >= self.config.max_level_attempts:
+            self._raise_level_limit(
+                "level_attempt_limit_reached",
+                snapshot,
+                limit=self.config.max_level_attempts,
+            )
+        self._raise_if_level_action_limit(snapshot)
+        if source == "game_over_level_reset":
+            self._game_over_resets_this_game += 1
+            self._game_over_resets_by_level[level_index] += 1
         runtime_log(
             "level_attempt_reset_emit",
             level=level_index,
@@ -365,13 +395,16 @@ class GameSession:
     def _emit(self, snapshot, candidate: CandidateAction) -> dict[str, Any]:
         if self.pending_action is not None:
             raise RuntimeError("attempted to emit while an official transition is pending")
+        self._raise_if_level_action_limit(snapshot)
         is_coordinate = candidate.action_id in snapshot.coordinate_action_ids or candidate.x is not None or candidate.y is not None
+        is_coordinate_research = is_coordinate and is_coordinate_research_source(candidate.source)
         self.memory.mark_emitted_action(
             snapshot.level_index,
             candidate.action_id,
             candidate.suppression_signature,
             state_signature=snapshot.semantic_state_signature,
             is_coordinate=is_coordinate,
+            is_coordinate_research=is_coordinate_research,
             coordinate_candidate_id=candidate.coordinate_candidate_id,
             coordinate_x=candidate.x,
             coordinate_y=candidate.y,
@@ -381,6 +414,7 @@ class GameSession:
         token = stable_hash((snapshot.snapshot_id, candidate.suppression_signature, self._action_count_this_game), "pending_")
         self.pending_action = PendingAction(snapshot, candidate, candidate.hypothesis_id, candidate.reason, token)
         self._action_count_this_game += 1
+        self._action_count_by_level[snapshot.level_index] += 1
         self._last_action_selection = {
             "verifier_exhausted": False,
             "selected_action_id": candidate.action_id,
@@ -435,11 +469,47 @@ class GameSession:
     def _handle_game_over(self, snapshot) -> dict[str, Any]:
         if not self.config.reset_on_game_over:
             raise RuntimeError("GAME_OVER requires RESET under ARC-AGI-3 rules, but reset_on_game_over is disabled")
-        self._game_over_resets_this_game += 1
-        self._game_over_resets_by_level[snapshot.level_index] += 1
-        # No reset limit is terminal. Competition timeout is the only orchestration terminal.
-        runtime_log("game_over_reset_emit", level=snapshot.level_index, step=snapshot.step_index, resets_game=self._game_over_resets_this_game, resets_level=self._game_over_resets_by_level[snapshot.level_index])
+        runtime_log(
+            "game_over_observed",
+            level=snapshot.level_index,
+            step=snapshot.step_index,
+            attempt_index=self._attempt_index_by_level.get(snapshot.level_index, 0),
+        )
         return self._emit_attempt_reset(snapshot, "game_over_observed", source="game_over_level_reset")
+
+    def _raise_if_level_action_limit(self, snapshot) -> None:
+        limit = int(self.config.max_actions_per_level)
+        if limit <= 0:
+            return
+        if self._action_count_by_level.get(snapshot.level_index, 0) < limit:
+            return
+        self._raise_level_limit("level_action_limit_reached", snapshot, limit=limit)
+
+    def _raise_level_limit(self, reason_code: str, snapshot, *, limit: int) -> None:
+        level_index = int(snapshot.level_index)
+        attempt_index = self._attempt_index_by_level.get(level_index, 0)
+        action_count = self._action_count_by_level.get(level_index, 0)
+        self._terminal_level_limit = {
+            "reason_code": reason_code,
+            "level_index": level_index,
+            "attempt_index": attempt_index,
+            "action_count": action_count,
+            "limit": int(limit),
+        }
+        self._last_action_selection = {
+            "verifier_exhausted": False,
+            "fallback_enabled": False,
+            "terminal_level_limit": True,
+            **self._terminal_level_limit,
+        }
+        runtime_log(reason_code, **self._terminal_level_limit)
+        raise LevelRunLimitReached(
+            reason_code,
+            level_index=level_index,
+            attempt_index=attempt_index,
+            action_count=action_count,
+            limit=limit,
+        )
 
     def _reset_for_new_game(self, game_id: str) -> None:
         self.memory.reset_game(game_id)
@@ -453,6 +523,8 @@ class GameSession:
         self._game_over_resets_this_game = 0
         self._game_over_resets_by_level = defaultdict(int)
         self._attempt_index_by_level = defaultdict(int)
+        self._action_count_by_level = defaultdict(int)
+        self._terminal_level_limit = {}
         self._last_committed_token = None
         self._latest_snapshot = None
         self._exhaustion_revisit_count = 0

@@ -1,0 +1,35 @@
+ARC-AGI-3 V8.3 FREEZE VALIDATION
+Date: 2026-07-15
+
+Frozen runtime contract
+- Context/input/output: 98304 / 65536 / 12288
+- Qwen / game wall clock: 500 / 6000 seconds
+- Per-game accepted-action limit: 200
+- Per-level action limit: disabled
+- Level attempts: 4
+- Competition/global deadline: disabled
+- Calls per level: primary 1, coordinate 1, reserve 0, total 2
+- Competition frontend: persistent vLLM, Qwen3.6-27B FP8, RTX6000, TP=1, max-num-seqs=1
+- Local frontend: Ollama, qwen_local_3_5
+
+Results
+- Current regression suite: PASS, 106 tests
+- Final production notebook build: PASS
+- Final production notebook size: 211183 bytes
+- Embedded payload files: 25
+- Every generated Python cell compiles: PASS
+- Every embedded payload Python file compiles: PASS
+- Embedded notebook/root v8_agent synchronization: PASS
+- Separate competition/global deadline marker: ABSENT
+- GAME_OVER replay/reset contract: PRESENT
+- Runtime datasets: arc3-vllm-h100-wheelhouse-v3 and vrfai-qwen3-6-27b-fp8-hf-snapshot
+- Phase-B model smoke precedes scorecard creation: PASS
+- Phase-B manual parquet creation: ABSENT
+- Normal scorecard close followed by nonempty parquet validation: PASS
+- Fatal scorecard close: ABSENT
+- Fatal parquet deletion and exception re-raise: PRESENT
+
+Last diagnostic harness before freeze
+- 25-demo fake-Qwen smoke: 25 episodes, 0 errors
+- ar25 real-Qwen control run: 0 runtime errors, level not completed, verifier exhausted after 20 actions
+- The subsequent inverse-pair-filter rerun was stopped on user request and is not a validation result.

@@ -361,7 +361,10 @@ The renderer does not alphabetically sort packet keys. Under context pressure, n
 
 ### 12.4 Backend
 
-The reference competition backend is `llama-cli` with an offline GGUF model. The fake backend is used by tests. A failed optional Qwen call falls back to deterministic exploration unless runtime configuration marks Qwen as required.
+The reference competition backend is one persistent local vLLM server with the
+offline `vrfai/Qwen3.6-27B-FP8` snapshot. The local work package uses Ollama,
+and `llama-cli` remains a compatibility backend. Competition calls disable
+thinking per request and require strict JSON-schema output.
 
 ## 13. Preflight boundary
 

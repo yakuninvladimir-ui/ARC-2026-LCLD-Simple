@@ -24,7 +24,15 @@ from .types import (
 )
 
 
-ACTION_EFFECT_PROBE_IDS = {"ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"}
+COORDINATE_RESEARCH_SOURCES = frozenset({
+    "coordinate_qwen",
+    "deterministic_coordinate_explorer",
+    "memory_aware_fallback",
+})
+
+
+def is_coordinate_research_source(source: str | None) -> bool:
+    return str(source or "") in COORDINATE_RESEARCH_SOURCES
 
 
 class GameMemory:
@@ -104,12 +112,19 @@ class GameMemory:
                 else record.get("level_index", -1)
             ) == level_index
         ]
+        research_records = [
+            record for record in records
+            if is_coordinate_research_source(record.get("source"))
+        ]
+        goal_records = [
+            record for record in records
+            if not is_coordinate_research_source(record.get("source"))
+            and str(record.get("source") or "") != "initial_action_probe"
+        ]
         failures = []
-        for record in records:
+        for record in goal_records:
             game_over = bool(record.get("game_over_delta"))
             progress = str(record.get("progress") or "")
-            if str(record.get("source") or "") == "initial_action_probe" and not game_over:
-                continue
             if not game_over and progress == "POSITIVE":
                 continue
             failures.append({
@@ -117,19 +132,34 @@ class GameMemory:
                 "source": record.get("source"),
                 "hypothesis_id": record.get("hypothesis_id"),
                 "semantic_hypothesis": record.get("hypothesis_claim"),
+                "coordinate_candidate_id": record.get("coordinate_candidate_id"),
+                "coordinate_xy": record.get("coordinate_xy"),
+                "clicked_cell_before": record.get("coordinate_cell_before"),
+                "clicked_cell_after": record.get("coordinate_cell_after"),
+                "changed_cell_count": record.get("changed_cell_count"),
+                "changed_color_transitions": (
+                    (record.get("changed_color_delta") or {}).get("transitions")
+                    if isinstance(record.get("changed_color_delta"), dict)
+                    else None
+                ),
+                "visible_effect_observed": bool(int(record.get("changed_cell_count") or 0) > 0),
+                "target_cell_changed": _target_cell_changed(record),
+                "observed_motion_vectors": record.get("observed_motion_vectors") or [],
+                "action_surface_added": record.get("planning_action_surface_added") or record.get("action_surface_added") or [],
+                "action_surface_removed": record.get("planning_action_surface_removed") or record.get("action_surface_removed") or [],
                 "reason_code": record.get("reason_code"),
-                "effect_outcome": record.get("effect_outcome"),
+                "verifier_effect_outcome": record.get("effect_outcome"),
                 "progress": record.get("progress"),
                 "game_over": game_over,
             })
         executed_hypotheses = []
         hypothesis_ids = list(dict.fromkeys(
             str(record.get("hypothesis_id"))
-            for record in records
+            for record in goal_records
             if record.get("hypothesis_id")
         ))
         for hypothesis_id in hypothesis_ids:
-            hypothesis_records = [record for record in records if str(record.get("hypothesis_id") or "") == hypothesis_id]
+            hypothesis_records = [record for record in goal_records if str(record.get("hypothesis_id") or "") == hypothesis_id]
             claim = next((str(record.get("hypothesis_claim")) for record in hypothesis_records if record.get("hypothesis_claim")), None)
             game_over = any(bool(record.get("game_over_delta")) for record in hypothesis_records)
             level_progress = any(
@@ -144,11 +174,14 @@ class GameMemory:
                 outcome = "EXHAUSTED_WITHOUT_LEVEL_PROGRESS"
             executed_hypotheses.append({
                 "hypothesis_id": hypothesis_id,
+                "source": hypothesis_records[0].get("source") if hypothesis_records else None,
                 "semantic_hypothesis": claim,
                 "action_runs": _compact_attempt_action_runs(hypothesis_records),
+                "observed_steps": [_attempt_observed_step(record) for record in hypothesis_records],
                 "executed_step_count": len(hypothesis_records),
                 "outcome": outcome,
                 "last_transition_reason": hypothesis_records[-1].get("reason_code") if hypothesis_records else None,
+                "retry_directive": "DO_NOT_REPEAT_THIS_COMPLETE_TRAJECTORY_UNCHANGED" if not level_progress else None,
             })
         item = {
             "level_index": level_index,
@@ -157,7 +190,15 @@ class GameMemory:
             "reset_trigger": reset_trigger,
             "step_index": step_index,
             "qwen_calls": qwen_calls,
+            "attempt_start_state_signature": records[0].get("grid_hash_before") if records else None,
+            "goal_entry_state_signature": goal_records[0].get("grid_hash_before") if goal_records else None,
             "action_runs": _compact_attempt_action_runs(records),
+            "attempt_total_execution": _attempt_total_execution(records),
+            "research_phase": {
+                "status": "EVIDENCE_COLLECTION_NOT_GOAL_EXECUTION",
+                "action_runs": _compact_attempt_action_runs(research_records),
+                "observed_steps": [_attempt_observed_step(record) for record in research_records],
+            },
             "executed_hypotheses": executed_hypotheses,
             "execution_failures": failures[-12:],
             "verifier_feedback": verifier_feedback,
@@ -215,22 +256,47 @@ class GameMemory:
         bucket = self.simple_action_attempts_by_level.setdefault(level_index, {})
         bucket[action_id] = bucket.get(action_id, 0) + 1
 
-    def unprobed_action_effect_ids(self, snapshot: Any, config: V8Config) -> list[str]:
-        available = [
+    def required_action_research_ids(self, snapshot: Any) -> list[str]:
+        """Return the gameplay actions exposed by the current official frame."""
+        return list(dict.fromkeys(
             str(action_id)
-            for action_id in (getattr(snapshot, "planning_action_ids", ()) or getattr(snapshot, "available_actions", ()))
-            if str(action_id) in ACTION_EFFECT_PROBE_IDS and str(action_id) not in set(getattr(snapshot, "coordinate_action_ids", ()))
-        ]
-        available = sorted(set(available))
-        remaining = [
-            action_id
-            for action_id in available
-            if self.simple_action_attempt_count(int(getattr(snapshot, "level_index", 0)), action_id) <= 0
-        ]
-        return remaining[: max(0, int(config.max_simple_action_probes_per_level))]
+            for action_id in (getattr(snapshot, "available_actions", ()) or ())
+            if str(action_id).upper() not in {"RESET", "RESTART"}
+        ))
+
+    def action_research_status(self, snapshot: Any) -> dict[str, list[str]]:
+        required = self.required_action_research_ids(snapshot)
+        coordinate = set(str(action_id) for action_id in (getattr(snapshot, "coordinate_action_ids", ()) or ()))
+        undo = set(str(action_id) for action_id in (getattr(snapshot, "undo_action_ids", ()) or ()))
+        observed = {
+            str(record.action_id)
+            for record in self.action_effects.values()
+            if float(getattr(record, "confidence", 0.0) or 0.0) >= 0.45
+        }
+        # Undo semantics are supplied by the environment contract. Executing undo as
+        # an exploratory action would spend a move and destroy the probe chronology.
+        researched_set = observed | undo
+        researched = [action_id for action_id in required if action_id in researched_set]
+        missing = [action_id for action_id in required if action_id not in researched_set]
+        return {
+            "required_action_ids": required,
+            "researched_action_ids": researched,
+            "missing_action_ids": missing,
+            "missing_simple_action_ids": [action_id for action_id in missing if action_id not in coordinate],
+            "missing_coordinate_action_ids": [action_id for action_id in missing if action_id in coordinate],
+            "intrinsically_known_undo_action_ids": [action_id for action_id in required if action_id in undo],
+        }
+
+    def unprobed_action_effect_ids(self, snapshot: Any, config: V8Config) -> list[str]:
+        del config  # The official action surface is already bounded; every missing action is mandatory.
+        return self.action_research_status(snapshot)["missing_simple_action_ids"]
 
     def action_effect_probe_complete(self, snapshot: Any, config: V8Config) -> bool:
-        return not self.unprobed_action_effect_ids(snapshot, config)
+        del config
+        return not self.action_research_status(snapshot)["missing_action_ids"]
+
+    def coordinate_action_research_needed(self, snapshot: Any) -> bool:
+        return bool(self.action_research_status(snapshot)["missing_coordinate_action_ids"])
 
     @staticmethod
     def state_scoped_action_signature(suppression_signature: str, state_signature: str | None) -> str:
@@ -246,19 +312,20 @@ class GameMemory:
         *,
         state_signature: str | None,
         is_coordinate: bool,
+        is_coordinate_research: bool = False,
         coordinate_candidate_id: str | None = None,
         coordinate_x: int | None = None,
         coordinate_y: int | None = None,
     ) -> None:
         scoped = self.state_scoped_action_signature(suppression_signature, state_signature)
         self.action_attempts_by_signature[scoped] = self.action_attempts_by_signature.get(scoped, 0) + 1
-        if is_coordinate:
+        if is_coordinate and is_coordinate_research:
             self.coordinate_probe_counts_by_level[level_index] = self.coordinate_probe_counts_by_level.get(level_index, 0) + 1
             self.coordinate_probe_signature_counts[scoped] = self.coordinate_probe_signature_counts.get(scoped, 0) + 1
             self.coordinate_candidates_clicked_this_attempt.update(
                 self.coordinate_attempt_keys(action_id, coordinate_candidate_id, coordinate_x, coordinate_y)
             )
-        else:
+        elif not is_coordinate:
             self.mark_simple_action_attempted(level_index, action_id)
 
     def action_attempt_count(self, suppression_signature: str, state_signature: str | None = None) -> int:
@@ -562,7 +629,7 @@ class GameMemory:
 
     def _action_memory_from_judgment(self, event: MemoryEvent, judgment: Judgment, outcome: str) -> dict[str, Any] | None:
         action = judgment.action
-        if action.action_id not in ACTION_EFFECT_PROBE_IDS and action.action_id != "ACTION6":
+        if action.action_id.upper() in {"RESET", "RESTART"}:
             return None
         delta = judgment.observed_delta
         object_deltas = _compact_object_deltas(delta.get("object_deltas") or [])
@@ -579,6 +646,9 @@ class GameMemory:
             "hypothesis_id": action.hypothesis_id,
             "hypothesis_claim": str(action.reason)[:560] if action.hypothesis_id else None,
             "coordinate_candidate_id": action.coordinate_candidate_id,
+            "coordinate_xy": [int(action.x), int(action.y)] if action.x is not None and action.y is not None else None,
+            "coordinate_cell_before": delta.get("coordinate_cell_before"),
+            "coordinate_cell_after": delta.get("coordinate_cell_after"),
             "contract_kind": judgment.contract_kind.value if judgment.contract_kind else None,
             "effect_outcome": outcome,
             "truth": judgment.truth.value,
@@ -667,21 +737,215 @@ def _compact_attempt_action_runs(records: list[dict[str, Any]]) -> list[dict[str
             continue
         source = str(record.get("source") or "unknown")
         hypothesis_id = record.get("hypothesis_id")
+        coordinate_candidate_id = record.get("coordinate_candidate_id")
+        coordinate_xy = record.get("coordinate_xy")
         if (
             runs
+            and coordinate_candidate_id is None
             and runs[-1]["action_id"] == action_id
             and runs[-1]["source"] == source
             and runs[-1].get("hypothesis_id") == hypothesis_id
+            and runs[-1].get("coordinate_candidate_id") is None
         ):
             runs[-1]["count"] += 1
         else:
-            runs.append({
+            item = {
                 "action_id": action_id,
                 "count": 1,
                 "source": source,
                 "hypothesis_id": hypothesis_id,
-            })
+            }
+            if coordinate_candidate_id is not None:
+                item["coordinate_candidate_id"] = coordinate_candidate_id
+            if coordinate_xy is not None:
+                item["coordinate_xy"] = coordinate_xy
+            runs.append(item)
     return runs
+
+
+def _attempt_total_execution(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe one continuous environment trajectory without phase boundaries."""
+    ordered_trajectory: list[dict[str, Any]] = []
+    aggregate_transitions: dict[str, int] = {}
+    coordinate_cell_transitions: dict[str, int] = {}
+    visible_effect_steps = 0
+    target_cell_change_steps = 0
+    coordinate_steps = 0
+    total_changed_cell_events = 0
+    level_progress_observed = False
+    game_over_observed = False
+
+    for ordinal, record in enumerate(records, start=1):
+        action_id = str(record.get("action_id") or "")
+        if not action_id:
+            continue
+        changed_cell_count = int(record.get("changed_cell_count") or 0)
+        target_cell_changed = _target_cell_changed(record)
+        step_level_progress = bool(
+            record.get("terminal_delta")
+            or record.get("levels_completed_delta")
+            or record.get("level_index_delta")
+        )
+        step_game_over = bool(record.get("game_over_delta"))
+        before = record.get("coordinate_cell_before")
+        after = record.get("coordinate_cell_after")
+        candidate_id = record.get("coordinate_candidate_id")
+
+        step = {
+            "ordinal": ordinal,
+            "step_index": record.get("step_index"),
+            "action_id": action_id,
+            "coordinate_candidate_id": candidate_id,
+            "coordinate_xy": record.get("coordinate_xy"),
+            "clicked_cell_before": before,
+            "clicked_cell_after": after,
+            "visible_effect_observed": bool(changed_cell_count > 0),
+            "target_cell_changed": target_cell_changed,
+            "observed_effect_class": _observed_effect_class(
+                visible_effect_observed=changed_cell_count > 0,
+                target_cell_changed=target_cell_changed,
+                level_progress_observed=step_level_progress,
+                game_over_observed=step_game_over,
+            ),
+            "level_progress_observed": step_level_progress,
+            "game_over_observed": step_game_over,
+        }
+        ordered_trajectory.append({
+            key: value
+            for key, value in step.items()
+            if value not in (None, [], {}) or isinstance(value, bool)
+        })
+
+        visible_effect_steps += int(changed_cell_count > 0)
+        total_changed_cell_events += changed_cell_count
+        level_progress_observed = level_progress_observed or step_level_progress
+        game_over_observed = game_over_observed or step_game_over
+        if candidate_id is not None:
+            coordinate_steps += 1
+            target_cell_change_steps += int(target_cell_changed)
+            if before is not None and after is not None:
+                transition = f"{before}->{after}"
+                coordinate_cell_transitions[transition] = coordinate_cell_transitions.get(transition, 0) + 1
+
+        color_delta = record.get("changed_color_delta")
+        transitions = color_delta.get("transitions") if isinstance(color_delta, dict) else None
+        if isinstance(transitions, dict):
+            for transition, count in transitions.items():
+                try:
+                    numeric_count = int(count)
+                except (TypeError, ValueError):
+                    continue
+                key = str(transition)
+                aggregate_transitions[key] = aggregate_transitions.get(key, 0) + numeric_count
+
+    if level_progress_observed:
+        outcome = "LEVEL_PROGRESS_OBSERVED"
+    elif game_over_observed:
+        outcome = "GAME_OVER_WITHOUT_LEVEL_PROGRESS"
+    else:
+        outcome = "NO_LEVEL_PROGRESS_AFTER_FULL_TRAJECTORY"
+
+    return {
+        "scope": "ALL_ENVIRONMENT_ACTIONS_EXECUTED_FROM_ATTEMPT_ENTRY_UNTIL_FAILURE_RESET",
+        "state_continuity": (
+            "NO_RESET_BETWEEN_ORDERED_STEPS; research and goal labels are provenance only and do not isolate environment state"
+        ),
+        "ordered_trajectory": ordered_trajectory,
+        "observed_result": {
+            "executed_step_count": len(ordered_trajectory),
+            "visible_effect_step_count": visible_effect_steps,
+            "coordinate_target_step_count": coordinate_steps,
+            "coordinate_target_changed_step_count": target_cell_change_steps,
+            "all_coordinate_targets_changed": bool(coordinate_steps) and target_cell_change_steps == coordinate_steps,
+            "coordinate_target_cell_transitions": coordinate_cell_transitions,
+            "total_changed_cell_events": total_changed_cell_events,
+            "aggregate_changed_color_transitions": aggregate_transitions,
+            "level_progress_observed": level_progress_observed,
+            "game_over_observed": game_over_observed,
+        },
+        "outcome": outcome,
+        "exact_replay_forbidden": bool(ordered_trajectory) and not level_progress_observed,
+    }
+
+
+def _attempt_observed_step(record: dict[str, Any]) -> dict[str, Any]:
+    color_delta = record.get("changed_color_delta") if isinstance(record.get("changed_color_delta"), dict) else {}
+    changed_cell_count = int(record.get("changed_cell_count") or 0)
+    target_cell_changed = _target_cell_changed(record)
+    level_progress_observed = bool(
+        record.get("terminal_delta")
+        or record.get("levels_completed_delta")
+        or record.get("level_index_delta")
+    )
+    object_changes = []
+    for change in record.get("object_deltas") or []:
+        if not isinstance(change, dict):
+            continue
+        item = {
+            "object_id": change.get("object_id"),
+            "motion_direction": change.get("motion_direction"),
+            "delta_centroid_rc": change.get("delta_centroid_rc"),
+            "before_colors": change.get("before_colors"),
+            "after_colors": change.get("after_colors"),
+            "shape_changed": change.get("shape_changed"),
+            "palette_changed": change.get("palette_changed"),
+            "area_delta": change.get("area_delta"),
+        }
+        object_changes.append({key: value for key, value in item.items() if value not in (None, [], {})})
+    item = {
+        "step_index": record.get("step_index"),
+        "action_id": record.get("action_id"),
+        "coordinate_candidate_id": record.get("coordinate_candidate_id"),
+        "coordinate_xy": record.get("coordinate_xy"),
+        "clicked_cell_before": record.get("coordinate_cell_before"),
+        "clicked_cell_after": record.get("coordinate_cell_after"),
+        "verifier_effect_outcome": record.get("effect_outcome"),
+        "visible_effect_observed": bool(changed_cell_count > 0),
+        "target_cell_changed": target_cell_changed,
+        "observed_effect_class": _observed_effect_class(
+            visible_effect_observed=changed_cell_count > 0,
+            target_cell_changed=target_cell_changed,
+            level_progress_observed=level_progress_observed,
+            game_over_observed=bool(record.get("game_over_delta")),
+        ),
+        "changed_cell_count": changed_cell_count,
+        "changed_color_transitions": color_delta.get("transitions") or {},
+        "observed_motion_vectors": record.get("observed_motion_vectors") or [],
+        "object_changes": object_changes[:8],
+        "available_actions_before": record.get("available_actions_before") or [],
+        "available_actions_after": record.get("available_actions_after") or [],
+        "action_surface_added": record.get("planning_action_surface_added") or record.get("action_surface_added") or [],
+        "action_surface_removed": record.get("planning_action_surface_removed") or record.get("action_surface_removed") or [],
+        "reason_code": record.get("reason_code"),
+        "progress": record.get("progress"),
+        "level_progress_observed": level_progress_observed,
+        "game_over_observed": bool(record.get("game_over_delta")),
+    }
+    return {key: value for key, value in item.items() if value not in (None, [], {}) or isinstance(value, bool)}
+
+
+def _target_cell_changed(record: dict[str, Any]) -> bool:
+    before = record.get("coordinate_cell_before")
+    after = record.get("coordinate_cell_after")
+    return before is not None and after is not None and before != after
+
+
+def _observed_effect_class(
+    *,
+    visible_effect_observed: bool,
+    target_cell_changed: bool,
+    level_progress_observed: bool,
+    game_over_observed: bool,
+) -> str:
+    if level_progress_observed:
+        return "LEVEL_PROGRESS_OBSERVED"
+    if game_over_observed:
+        return "GAME_OVER_AFTER_ACTION"
+    if target_cell_changed:
+        return "TARGET_STATE_CHANGED_WITHOUT_LEVEL_PROGRESS"
+    if visible_effect_observed:
+        return "VISIBLE_CHANGE_WITHOUT_LEVEL_PROGRESS"
+    return "NO_VISIBLE_CHANGE"
 
 
 def _dedupe_events(events: list[MemoryEvent]) -> list[MemoryEvent]:

@@ -9,9 +9,15 @@ from typing import Any
 class V8Config:
     # LLM proposer. V8.3 keeps the public class name for package compatibility.
     enable_qwen: bool = True
-    qwen_backend: str = "fake"  # disabled | fake | qwen_local | llama_cli
+    qwen_backend: str = "fake"  # disabled | fake | ollama | vllm | qwen_local | llama_cli
     qwen_model_path: str | None = None
     qwen_llama_cli_path: str | None = None
+    qwen_ollama_base_url: str = "http://127.0.0.1:11434"
+    qwen_ollama_model: str = "qwen_local_3_5"
+    qwen_ollama_keep_alive: str = "-1"
+    qwen_vllm_base_url: str = "http://127.0.0.1:1234/v1"
+    qwen_vllm_api_key: str = "EMPTY"
+    qwen_vllm_model: str = "vrfai/Qwen3.6-27B-FP8"
     qwen_llama_device: str | None = None
     qwen_split_mode: str = ""
     qwen_tensor_split: str = ""
@@ -27,7 +33,7 @@ class V8Config:
     qwen_context_tokens: int = 98304
     qwen_minimum_acceptance_context_tokens: int = 65536
     qwen_max_input_tokens: int = 65536
-    qwen_max_output_tokens: int = 4096
+    qwen_max_output_tokens: int = 12288
     qwen_reserved_runtime_margin_tokens: int = 8192
     qwen_enable_thinking: bool = False
     qwen_reasoning_mode: str = "off"
@@ -78,6 +84,7 @@ class V8Config:
     max_coordinate_probes_per_level: int = 24
     max_coordinate_probe_repeats_per_signature: int = 1
     max_same_state_action_repeats: int = 1
+    reject_unchanged_failed_trajectories: bool = True
 
     allow_qwen_raw_coordinates: bool = False
     require_coordinate_candidate_id: bool = True
@@ -93,8 +100,10 @@ class V8Config:
 
     # Competition orchestration. GAME_OVER is reset-capable; timeout belongs to
     # the outer harness and must not be converted into RESET.
-    max_actions_per_game: int = 80
-    game_wall_clock_limit_seconds: int = 5000
+    max_actions_per_game: int = 200
+    max_actions_per_level: int = 0
+    max_level_attempts: int = 4
+    game_wall_clock_limit_seconds: int = 6000
     reset_on_game_over: bool = True
     max_game_over_resets_per_game: int = 0  # 0 = unlimited; diagnostics only
     max_game_over_resets_per_level: int = 0  # 0 = unlimited; diagnostics only
@@ -148,6 +157,12 @@ def config_from_mapping(mapping: dict[str, Any] | None = None) -> V8Config:
         "qwen_backend": ("ARC_V8_QWEN_BACKEND", "ARC_LLM_ADVISOR_BACKEND"),
         "qwen_model_path": ("ARC_QWEN_MODEL_PATH", "ARC_LLM_MODEL_PATH"),
         "qwen_llama_cli_path": ("ARC_QWEN_LLAMA_CLI_PATH",),
+        "qwen_ollama_base_url": ("ARC_QWEN_OLLAMA_BASE_URL",),
+        "qwen_ollama_model": ("ARC_QWEN_OLLAMA_MODEL",),
+        "qwen_ollama_keep_alive": ("ARC_QWEN_OLLAMA_KEEP_ALIVE",),
+        "qwen_vllm_base_url": ("ARC_QWEN_VLLM_BASE_URL", "OPENAI_BASE_URL"),
+        "qwen_vllm_api_key": ("ARC_QWEN_VLLM_API_KEY", "OPENAI_API_KEY"),
+        "qwen_vllm_model": ("ARC_QWEN_VLLM_MODEL",),
         "qwen_llama_device": ("ARC_QWEN_LLAMA_DEVICE",),
         "qwen_split_mode": ("ARC_QWEN_SPLIT_MODE", "LLAMA_ARG_SPLIT_MODE"),
         "qwen_tensor_split": ("ARC_QWEN_TENSOR_SPLIT", "LLAMA_ARG_TENSOR_SPLIT"),
@@ -180,6 +195,8 @@ def config_from_mapping(mapping: dict[str, Any] | None = None) -> V8Config:
         "max_coordinate_qwen_calls_per_level": ("ARC_MAX_QWEN_COORDINATE_CALLS_PER_LEVEL", "ARC_V8_MAX_COORDINATE_QWEN_CALLS_PER_LEVEL"),
         "max_total_qwen_calls_per_level": ("ARC_MAX_TOTAL_QWEN_CALLS_PER_LEVEL", "ARC_V8_MAX_TOTAL_QWEN_CALLS_PER_LEVEL"),
         "max_actions_per_game": ("LCLD_MAX_ACTIONS_PER_GAME", "ARC_V8_MAX_ACTIONS_PER_GAME"),
+        "max_actions_per_level": ("LCLD_MAX_ACTIONS_PER_LEVEL", "ARC_V8_MAX_ACTIONS_PER_LEVEL"),
+        "max_level_attempts": ("LCLD_MAX_LEVEL_ATTEMPTS", "ARC_V8_MAX_LEVEL_ATTEMPTS"),
         "game_wall_clock_limit_seconds": ("LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS", "ARC_V8_GAME_WALL_CLOCK_LIMIT_SECONDS"),
         "reset_on_game_over": ("LCLD_RESET_ON_GAME_OVER", "ARC_V8_RESET_ON_GAME_OVER"),
         "qwen_require_runtime": ("ARC_V8_REQUIRE_QWEN_RUNTIME", "LCLD_REQUIRE_QWEN_RUNTIME"),
