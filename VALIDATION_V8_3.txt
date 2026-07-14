@@ -15,7 +15,7 @@ Frozen runtime contract
 Results
 - Current regression suite: PASS, 106 tests
 - Final production notebook build: PASS
-- Final production notebook size: 211528 bytes
+- Final production notebook size: 211529 bytes
 - Embedded payload files: 25
 - Every generated Python cell compiles: PASS
 - Every embedded payload Python file compiles: PASS
@@ -24,7 +24,7 @@ Results
 - GAME_OVER replay/reset contract: PRESENT
 - Runtime datasets: arc3-vllm-h100-wheelhouse-v3 and vrfai-qwen3-6-27b-fp8-hf-snapshot
 - Phase-B model smoke precedes scorecard creation: PASS
-- Phase-A accelerator type validation: DISABLED (P100-compatible static preflight)
+- Phase-A GPU/accelerator validation: DISABLED (CPU/P100-compatible static preflight)
 - Phase-B accelerator type validation: REQUIRED (one RTX6000)
 - Phase-B manual parquet creation: ABSENT
 - Normal scorecard close followed by nonempty parquet validation: PASS

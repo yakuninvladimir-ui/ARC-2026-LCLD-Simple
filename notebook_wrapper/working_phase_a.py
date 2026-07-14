@@ -19,7 +19,7 @@ if not IS_PHASE_B_CANDIDATE:
     try:
         arcade_env_path, manifest = setup_runtime(
             phase='phase_a_qwen_static_preflight',
-            heavy_diagnostics=True,
+            heavy_diagnostics=False,
             qwen_probe=False,
             full_import_sweep=False,
             start_model_server=False,

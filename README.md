@@ -38,7 +38,7 @@ The model and wheelhouse datasets are referenced by the generated Kaggle metadat
 
 ## Competition Lifecycle
 
-Phase A performs static validation without loading the model, accepts Kaggle's P100 without an RTX6000 type check, and writes the required nonempty validation parquet only outside a competition rerun. Phase B still requires exactly one RTX6000 before starting vLLM.
+Phase A performs static validation without loading the model or invoking GPU/accelerator validation, so it can run on Kaggle's CPU or P100 allocation. It writes the required nonempty validation parquet only outside a competition rerun. Phase B still requires exactly one RTX6000 before starting vLLM.
 
 Phase B follows this order:
 

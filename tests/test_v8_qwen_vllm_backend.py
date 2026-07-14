@@ -221,6 +221,7 @@ def test_generated_qwen_notebook_contract_and_payload():
 
     assert "start_model_server=False" in phase_a_source
     assert "validate_accelerator=False" in phase_a_source
+    assert "heavy_diagnostics=False" in phase_a_source
     assert "start_vllm_server(" not in phase_a_source
     assert "validate_accelerator=True" in phase_b_source
     assert "phase_b_model_smoke_or_die()" in phase_b_source
