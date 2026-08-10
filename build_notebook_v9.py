@@ -41,7 +41,7 @@ MARKER = "ARC_V9_SAFE_HARNESS_THINKING32K_STATIC_SCHEMA_SERIAL_GATEWAY"
 MAX_NOTEBOOK_BYTES = 985_000
 
 PAYLOAD_EXCLUDED_DIRS = {".git", "__pycache__", ".pytest_cache", "notebooks", "assets"}
-PAYLOAD_EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".old"}
+PAYLOAD_EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".old", ".bak"}
 PAYLOAD_EXCLUDED_RELATIVE_PATHS = {
     "build_notebook.py",
     "build_notebook_v9.py",
@@ -307,7 +307,7 @@ def _generated_submission_source() -> str:
                 "qwen_split_mode": os.environ.get("ARC_QWEN_SPLIT_MODE", os.environ.get("LLAMA_ARG_SPLIT_MODE", "")),
                 "qwen_tensor_split": os.environ.get("ARC_QWEN_TENSOR_SPLIT", os.environ.get("LLAMA_ARG_TENSOR_SPLIT", "")),
                 "qwen_gpu_layers": int(os.environ.get("ARC_QWEN_GPU_LAYERS", "999")),
-                "qwen_timeout_seconds": int(os.environ.get("ARC_QWEN_TIMEOUT_SECONDS", "600")),
+                "qwen_timeout_seconds": int(os.environ.get("ARC_QWEN_TIMEOUT_SECONDS", "700")),
                 "qwen_context_tokens": int(os.environ.get("ARC_QWEN_CONTEXT_TOKENS", "131072")),
                 "qwen_minimum_acceptance_context_tokens": int(os.environ.get("ARC_QWEN_MINIMUM_ACCEPTANCE_CONTEXT_TOKENS", "65536")),
                 "qwen_max_input_tokens": int(os.environ.get("ARC_QWEN_MAX_INPUT_TOKENS", "65536")),
@@ -316,11 +316,11 @@ def _generated_submission_source() -> str:
                 "qwen_enable_thinking": thinking_enabled,
                 "qwen_reasoning_mode": "on" if thinking_enabled else "off",
                 "qwen_reasoning_budget_tokens": reasoning_budget_tokens,
-                "qwen_temperature": float(os.environ.get("ARC_QWEN_TEMPERATURE", "0.6")),
-                "qwen_top_k": int(os.environ.get("ARC_QWEN_TOP_K", "20")),
+                "qwen_temperature": float(os.environ.get("ARC_QWEN_TEMPERATURE", "0.4")),
+                "qwen_top_k": int(os.environ.get("ARC_QWEN_TOP_K", "30")),
                 "qwen_top_p": float(os.environ.get("ARC_QWEN_TOP_P", "0.95")),
                 "qwen_min_p": float(os.environ.get("ARC_QWEN_MIN_P", "0.0")),
-                "qwen_presence_penalty": float(os.environ.get("ARC_QWEN_PRESENCE_PENALTY", "0.0")),
+                "qwen_presence_penalty": float(os.environ.get("ARC_QWEN_PRESENCE_PENALTY", "0.05")),
                 "qwen_repeat_penalty": float(os.environ.get("ARC_QWEN_REPEAT_PENALTY", "1.0")),
                 "qwen_vllm_base_url": os.environ.get("ARC_QWEN_VLLM_BASE_URL", "http://127.0.0.1:1234/v1"),
                 "qwen_vllm_api_key": os.environ.get("ARC_QWEN_VLLM_API_KEY", "EMPTY"),
@@ -328,20 +328,20 @@ def _generated_submission_source() -> str:
                 "qwen_multimodal_enabled": os.environ.get("ARC_QWEN_MULTIMODAL_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
                 "qwen_require_runtime": os.environ.get("LCLD_REQUIRE_QWEN_RUNTIME", "1").lower() in {"1", "true", "yes", "on"},
                 "max_qwen_calls_per_game": int(os.environ.get("ARC_V8_MAX_QWEN_CALLS_PER_GAME", "20")),
-                "max_primary_qwen_calls_per_level": int(os.environ.get("ARC_MAX_QWEN_PRIMARY_CALLS_PER_LEVEL", "1")),
+                "max_primary_qwen_calls_per_level": int(os.environ.get("ARC_MAX_QWEN_PRIMARY_CALLS_PER_LEVEL", "3")),
                 "max_reserve_qwen_calls_per_level": int(os.environ.get("ARC_MAX_QWEN_REPLAN_CALLS_PER_LEVEL", "0")),
                 "max_coordinate_qwen_calls_per_level": int(os.environ.get("ARC_MAX_QWEN_COORDINATE_CALLS_PER_LEVEL", "1")),
-                "max_total_qwen_calls_per_level": int(os.environ.get("ARC_MAX_TOTAL_QWEN_CALLS_PER_LEVEL", "2")),
-                "max_actions_per_game": int(os.environ.get("LCLD_MAX_ACTIONS_PER_GAME", "200")),
+                "max_total_qwen_calls_per_level": int(os.environ.get("ARC_MAX_TOTAL_QWEN_CALLS_PER_LEVEL", "6")),
+                "max_actions_per_game": int(os.environ.get("LCLD_MAX_ACTIONS_PER_GAME", "500")),
                 "max_level_attempts": int(os.environ.get("LCLD_MAX_LEVEL_ATTEMPTS", "0")),
-                "max_actions_per_level": int(os.environ.get("LCLD_MAX_ACTIONS_PER_LEVEL", "200")),
-                "game_wall_clock_limit_seconds": int(float(os.environ.get("LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS", "6000"))),
+                "max_actions_per_level": int(os.environ.get("LCLD_MAX_ACTIONS_PER_LEVEL", "500")),
+                "game_wall_clock_limit_seconds": int(float(os.environ.get("LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS", "5000"))),
                 "max_game_over_resets_per_game": 0,
                 "max_game_over_resets_per_level": 0,
                 "reset_on_game_over": os.environ.get("LCLD_RESET_ON_GAME_OVER", "1").lower() in {"1", "true", "yes", "on"},
                 # Compatibility names used by the direct competition harness.
                 "llm_advisor_backend": os.environ.get("ARC_LLM_ADVISOR_BACKEND", "vllm"),
-                "llm_timeout_seconds": int(os.environ.get("ARC_QWEN_TIMEOUT_SECONDS", "600")),
+                "llm_timeout_seconds": int(os.environ.get("ARC_QWEN_TIMEOUT_SECONDS", "700")),
                 "qwen_prompt_profile": "v8_3_verified_contract_json",
                 "qwen_trace_dir": None,
             })
@@ -457,6 +457,10 @@ def _source_payload() -> str:
         ROOT / "v9_agent" / "session.py",
         ROOT / "v9_agent" / "llm.py",
         ROOT / "v9_agent" / "qwen_packet.py",
+        ROOT / "v9_agent" / "trajectory.py",
+        ROOT / "v9_agent" / "verifier_packet.py",
+        ROOT / "v9_agent" / "frame_media.py",
+        ROOT / "v9_agent" / "planning_set.py",
     ]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
@@ -572,10 +576,16 @@ def _preflight_script_source() -> str:
         assert int(delegate.config.get('qwen_context_tokens', 0)) == 131072, repr(delegate.config)
         assert int(delegate.config.get('qwen_max_input_tokens', 0)) == 65536, repr(delegate.config)
         assert int(delegate.config.get('qwen_max_output_tokens', 0)) == 49152, repr(delegate.config)
-        assert float(delegate.config.get('qwen_temperature', -1)) == 0.6, repr(delegate.config)
-        assert float(delegate.config.get('qwen_top_p', -1)) == 0.95, repr(delegate.config)
-        assert int(delegate.config.get('qwen_top_k', -1)) == 20, repr(delegate.config)
-        assert float(delegate.config.get('qwen_presence_penalty', -1)) == 0.0, repr(delegate.config)
+        expected_temperature = float(os.environ.get('ARC_QWEN_TEMPERATURE', '0.4'))
+        expected_top_p = float(os.environ.get('ARC_QWEN_TOP_P', '0.95'))
+        expected_top_k = int(os.environ.get('ARC_QWEN_TOP_K', '30'))
+        expected_presence = float(os.environ.get('ARC_QWEN_PRESENCE_PENALTY', '0.05'))
+        assert float(delegate.config.get('qwen_temperature', -1)) == expected_temperature, repr(delegate.config)
+        assert float(delegate.config.get('qwen_top_p', -1)) == expected_top_p, repr(delegate.config)
+        assert int(delegate.config.get('qwen_top_k', -1)) == expected_top_k, repr(delegate.config)
+        assert float(delegate.config.get('qwen_presence_penalty', -1)) == expected_presence, repr(delegate.config)
+        assert int(delegate.config.get('max_actions_per_game', -1)) == int(os.environ.get('LCLD_MAX_ACTIONS_PER_GAME', '500')), repr(delegate.config)
+        assert int(delegate.config.get('max_actions_per_level', -1)) == int(os.environ.get('LCLD_MAX_ACTIONS_PER_LEVEL', '500')), repr(delegate.config)
         print('=== LCLD DIRECT-AGENT STRUCTURAL PREFLIGHT OK ===', phase, flush=True)
         """
     )
@@ -685,19 +695,21 @@ def _adapt_working_phase_b_source(source: str) -> str:
                 'qwen_enable_thinking': thinking_enabled,
                 'qwen_reasoning_mode': 'on' if thinking_enabled else 'off',
                 'qwen_reasoning_budget_tokens': reasoning_budget_tokens,
-                'qwen_temperature': 0.6,
-                'qwen_top_p': 0.95,
-                'qwen_top_k': 20,
-                'qwen_presence_penalty': 0.0,
+                'qwen_temperature': float(os.environ.get('ARC_QWEN_TEMPERATURE', '0.4')),
+                'qwen_top_p': float(os.environ.get('ARC_QWEN_TOP_P', '0.95')),
+                'qwen_top_k': int(os.environ.get('ARC_QWEN_TOP_K', '30')),
+                'qwen_min_p': float(os.environ.get('ARC_QWEN_MIN_P', '0.05')),
+                'qwen_presence_penalty': float(os.environ.get('ARC_QWEN_PRESENCE_PENALTY', '0.05')),
+                'qwen_repeat_penalty': float(os.environ.get('ARC_QWEN_REPEAT_PENALTY', '1.05')),
                 'qwen_strict_required': True,
-                'qwen_timeout_seconds': int(os.environ.get('ARC_QWEN_TIMEOUT_SECONDS', '600')),
-                'llm_timeout_seconds': int(os.environ.get('ARC_LLM_TIMEOUT_SECONDS', '600')),
-                'action_selection_timeout_s': 6000.0,
-                'major_cycle_wall_clock_budget_seconds': 6000,
-                'total_game_wall_clock_limit_seconds': 6000,
-                'max_level_attempts': 0,
-                'max_actions_per_game': 200,
-                'max_actions_per_level': 200,
+                'qwen_timeout_seconds': int(os.environ.get('ARC_QWEN_TIMEOUT_SECONDS', '700')),
+                'llm_timeout_seconds': int(os.environ.get('ARC_LLM_TIMEOUT_SECONDS', '700')),
+                'action_selection_timeout_s': 5000.0,
+                'major_cycle_wall_clock_budget_seconds': 5000,
+                'total_game_wall_clock_limit_seconds': 5000,
+                'max_level_attempts': int(os.environ.get('LCLD_MAX_LEVEL_ATTEMPTS', '0')),
+                'max_actions_per_game': int(os.environ.get('LCLD_MAX_ACTIONS_PER_GAME', '500')),
+                'max_actions_per_level': int(os.environ.get('LCLD_MAX_ACTIONS_PER_LEVEL', '500')),
             })
             return config
         """
@@ -707,7 +719,7 @@ def _adapt_working_phase_b_source(source: str) -> str:
         def _run_direct_game(env, game_id, initial_frame, abort_event=None):
             config = _direct_config()
             delegate = ARC_AGI_Agent(config)
-            game_wall_limit = max(0.0, float(os.getenv('LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS', '6000')))
+            game_wall_limit = max(0.0, float(os.getenv('LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS', '5000')))
             started = time.monotonic()
             accepted_actions = 0
             proposed_actions = 0
@@ -907,17 +919,17 @@ def _adapt_working_phase_b_source(source: str) -> str:
                 'one_attempt_game_over_terminal': False,
                 'game_over_reset_policy': 'single_reset_before_next_qwen_call',
                 'game_concurrency': min(
-                    max(1, int(os.environ.get('LCLD_GAME_CONCURRENCY', '4'))),
+                    max(1, int(os.environ.get('LCLD_GAME_CONCURRENCY', '5'))),
                     max(1, int(game_count)),
                 ),
                 'vllm_max_num_seqs': int(VLLM_MAX_NUM_SEQS),
-                'qwen_timeout_seconds': int(os.environ.get('ARC_QWEN_TIMEOUT_SECONDS', '600')),
+                'qwen_timeout_seconds': int(os.environ.get('ARC_QWEN_TIMEOUT_SECONDS', '700')),
                 'game_wall_clock_limit_seconds': int(float(
-                    os.environ.get('LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS', '6000')
+                    os.environ.get('LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS', '5000')
                 )),
-                'max_level_attempts': 0,
-                'max_actions_per_game': 200,
-                'max_actions_per_level': 200,
+                'max_level_attempts': int(os.environ.get('LCLD_MAX_LEVEL_ATTEMPTS', '0')),
+                'max_actions_per_game': int(os.environ.get('LCLD_MAX_ACTIONS_PER_GAME', '500')),
+                'max_actions_per_level': int(os.environ.get('LCLD_MAX_ACTIONS_PER_LEVEL', '500')),
                 'competition_reset_semantics': 'official_gateway_current_level_reset',
                 'game_count': int(game_count),
                 'attempted_games': sum(1 for item in results if item.get('status') != 'skipped_global_deadline'),
@@ -1037,6 +1049,10 @@ def _adapt_working_common_source(source: str, preflight_script: str) -> str:
                 code_dir / 'v9_agent' / 'session.py',
                 code_dir / 'v9_agent' / 'llm.py',
                 code_dir / 'v9_agent' / 'qwen_packet.py',
+                code_dir / 'v9_agent' / 'trajectory.py',
+                code_dir / 'v9_agent' / 'verifier_packet.py',
+                code_dir / 'v9_agent' / 'frame_media.py',
+                code_dir / 'v9_agent' / 'planning_set.py',
             ]
             missing_payload = [str(path) for path in required_payload if not path.exists()]
             if missing_payload:
@@ -1108,6 +1124,10 @@ def _current_agent_unpack_source(payload: str) -> str:
             code_dir / 'v9_agent' / 'session.py',
             code_dir / 'v9_agent' / 'llm.py',
             code_dir / 'v9_agent' / 'qwen_packet.py',
+            code_dir / 'v9_agent' / 'trajectory.py',
+            code_dir / 'v9_agent' / 'verifier_packet.py',
+            code_dir / 'v9_agent' / 'frame_media.py',
+            code_dir / 'v9_agent' / 'planning_set.py',
         ]
         missing = [str(path) for path in required if not path.exists()]
         if missing:
