@@ -21,7 +21,7 @@ VLLM_BASE_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/v1'
 VLLM_HEALTH_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/health'
 VLLM_STARTUP_TIMEOUT_SECONDS = 900
 VLLM_MAX_MODEL_LEN = 131072
-VLLM_MAX_NUM_SEQS = 4
+VLLM_MAX_NUM_SEQS = 5
 VLLM_TENSOR_PARALLEL_SIZE = 1
 QWEN_MAX_INPUT_TOKENS = 65536
 QWEN_MAX_OUTPUT_TOKENS = 49152
@@ -30,7 +30,7 @@ QWEN_MAX_OUTPUT_TOKENS = 49152
 QWEN_THINKING_ENABLED = True
 # The OSS vLLM OpenAI endpoint has no per-request thinking-budget parameter.
 # ``max_tokens`` is the hard cap for thinking plus final JSON.
-QWEN_REASONING_BUDGET_TOKENS = 0
+QWEN_REASONING_BUDGET_TOKENS = 32000
 VLLM_WHEELHOUSE_STAMP = 'vllm==0.19.0 torch==2.10.0 flashinfer==0.6.6\n'
 
 working_root = pathlib.Path('/kaggle/working')
@@ -168,7 +168,7 @@ def _vllm_env():
         'TRANSFORMERS_NO_TORCHVISION': '1',
         'VLLM_NO_USAGE_STATS': '1',
         'VLLM_XGRAMMAR_CACHE_MB': '64',
-        'VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS': '600',
+        'VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS': '700',
     })
     return env
 
@@ -226,18 +226,18 @@ def _configure_qwen_env(model_path):
         'ARC_QWEN_MAX_OUTPUT_TOKENS': str(QWEN_MAX_OUTPUT_TOKENS),
         'ARC_QWEN_RESERVED_RUNTIME_MARGIN_TOKENS': '8192',
         'ARC_QWEN_CONTEXT_RESERVED_MARGIN': '8192',
-        'ARC_QWEN_TIMEOUT_SECONDS': '600',
-        'ARC_LLM_TIMEOUT_SECONDS': '600',
+        'ARC_QWEN_TIMEOUT_SECONDS': '700',
+        'ARC_LLM_TIMEOUT_SECONDS': '700',
         'ARC_QWEN_ENABLE_THINKING': str(QWEN_THINKING_ENABLED).lower(),
         'ARC_QWEN_REASONING_MODE': 'on' if QWEN_THINKING_ENABLED else 'off',
         'ARC_QWEN_REASONING_BUDGET_TOKENS': str(QWEN_REASONING_BUDGET_TOKENS),
         'ARC_QWEN_SCHEMA_MODE': 'dynamic_enum',
-        'ARC_QWEN_TEMPERATURE': '0.6',
-        'ARC_QWEN_TOP_K': '20',
+        'ARC_QWEN_TEMPERATURE': '0.4',
+        'ARC_QWEN_TOP_K': '30',
         'ARC_QWEN_TOP_P': '0.95',
-        'ARC_QWEN_MIN_P': '0.0',
-        'ARC_QWEN_PRESENCE_PENALTY': '0.0',
-        'ARC_QWEN_REPEAT_PENALTY': '1.0',
+        'ARC_QWEN_MIN_P': '0.05',
+        'ARC_QWEN_PRESENCE_PENALTY': '0.05',
+        'ARC_QWEN_REPEAT_PENALTY': '1.05',
         'ARC_QWEN_SEED': '0',
         'ARC_QWEN_STRICT_REQUIRED': 'true',
         'LCLD_REQUIRE_QWEN_RUNTIME': '1',
@@ -250,15 +250,15 @@ def _configure_qwen_env(model_path):
             if QWEN_THINKING_ENABLED
             else 'vrfai_qwen3_6_27b_fp8_vllm_nonthinking_128k'
         ),
-        'ARC_MAX_QWEN_PRIMARY_CALLS_PER_LEVEL': '1',
+        'ARC_MAX_QWEN_PRIMARY_CALLS_PER_LEVEL': '3',
         'ARC_MAX_QWEN_REPLAN_CALLS_PER_LEVEL': '0',
         'ARC_MAX_QWEN_COORDINATE_CALLS_PER_LEVEL': '1',
-        'ARC_MAX_TOTAL_QWEN_CALLS_PER_LEVEL': '2',
-        'LCLD_MAX_ACTIONS_PER_GAME': '200',
-        'LCLD_MAX_ACTIONS_PER_LEVEL': '200',
+        'ARC_MAX_TOTAL_QWEN_CALLS_PER_LEVEL': '6',
+        'LCLD_MAX_ACTIONS_PER_GAME': '500',
+        'LCLD_MAX_ACTIONS_PER_LEVEL': '500',
         'LCLD_MAX_LEVEL_ATTEMPTS': '0',
-        'LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS': '6000',
-        'LCLD_GAME_CONCURRENCY': '4',
+        'LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS': '5000',
+        'LCLD_GAME_CONCURRENCY': '5',
         'LCLD_COMPETITION_WALL_CLOCK_LIMIT_SECONDS': '30600',
         'LCLD_COMPETITION_STOP_MARGIN_SECONDS': '60',
         'MPLBACKEND': 'agg',
@@ -284,6 +284,10 @@ def _build_vllm_command(model_path):
         '--port', str(VLLM_PORT),
         '--tensor-parallel-size', str(VLLM_TENSOR_PARALLEL_SIZE),
         '--max-num-seqs', str(VLLM_MAX_NUM_SEQS),
+        # The agent sends TWO images per hypothesis call (raw grid + annotated
+        # markup). Historical vLLM defaults allow only 1 image per prompt, which
+        # rejects every Qwen call with HTTP 400 and kills the run instantly.
+        '--limit-mm-per-prompt', '{"image": 4}',
         '--enable-auto-tool-choice',
         '--tool-call-parser', 'qwen3_coder',
         '--generation-config', 'vllm',
@@ -439,11 +443,11 @@ def setup_arcade_client_env():
         'OPERATION_MODE': 'competition',
         'ENVIRONMENTS_DIR': '/kaggle/input/competitions/arc-prize-2026-arc-agi-3/environment_files',
         'RECORDINGS_DIR': '/kaggle/working/server_recording',
-        'LCLD_MAX_ACTIONS_PER_GAME': '200',
-        'LCLD_MAX_ACTIONS_PER_LEVEL': '200',
+        'LCLD_MAX_ACTIONS_PER_GAME': '500',
+        'LCLD_MAX_ACTIONS_PER_LEVEL': '500',
         'LCLD_MAX_LEVEL_ATTEMPTS': '0',
-        'LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS': '6000',
-        'LCLD_GAME_CONCURRENCY': '4',
+        'LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS': '5000',
+        'LCLD_GAME_CONCURRENCY': '5',
         'LCLD_COMPETITION_WALL_CLOCK_LIMIT_SECONDS': '30600',
         'LCLD_COMPETITION_STOP_MARGIN_SECONDS': '60',
     }
@@ -475,13 +479,13 @@ def structural_preflight():
         'qwen_minimum_acceptance_context_tokens': 65536,
         'qwen_max_input_tokens': 65536,
         'qwen_max_output_tokens': 49152,
-        'qwen_timeout_seconds': 600,
+        'qwen_timeout_seconds': 700,
         'qwen_reasoning_mode': 'on' if QWEN_THINKING_ENABLED else 'off',
         'qwen_reasoning_budget_tokens': QWEN_REASONING_BUDGET_TOKENS,
-        'max_actions_per_game': 200,
-        'max_actions_per_level': 200,
+        'max_actions_per_game': 500,
+        'max_actions_per_level': 500,
         'max_level_attempts': 0,
-        'game_wall_clock_limit_seconds': 6000,
+        'game_wall_clock_limit_seconds': 5000,
     }
     mismatches = {key: (getattr(config, key), value) for key, value in expected.items() if getattr(config, key) != value}
     if mismatches:
@@ -489,10 +493,10 @@ def structural_preflight():
     if config.qwen_vllm_model != QWEN_MODEL_NAME or bool(config.qwen_enable_thinking) != QWEN_THINKING_ENABLED:
         raise RuntimeError('Qwen vLLM model/thinking contract mismatch')
     sampling_expected = {
-        'qwen_temperature': 0.6,
+        'qwen_temperature': 0.4,
         'qwen_top_p': 0.95,
-        'qwen_top_k': 20,
-        'qwen_presence_penalty': 0.0,
+        'qwen_top_k': 30,
+        'qwen_presence_penalty': 0.05,
     }
     sampling_mismatches = {
         key: (getattr(config, key), value)
@@ -521,7 +525,7 @@ def write_diagnostics_manifest(*, phase, runtime_info, arcade_env_path, heavy_di
         'max_input_tokens': QWEN_MAX_INPUT_TOKENS,
         'max_output_tokens': QWEN_MAX_OUTPUT_TOKENS,
         'max_num_seqs': VLLM_MAX_NUM_SEQS,
-        'reasoning_budget_tokens': int(os.environ.get('ARC_QWEN_REASONING_BUDGET_TOKENS', '0')),
+        'reasoning_budget_tokens': int(os.environ.get('ARC_QWEN_REASONING_BUDGET_TOKENS', '32000')),
         'output_schema_mode': os.environ.get('ARC_QWEN_SCHEMA_MODE', 'static'),
         'runtime_info': runtime_info,
         'arcade_env_path': str(arcade_env_path),
@@ -621,12 +625,12 @@ def phase_b_model_smoke_or_die():
                 'role': 'user',
                 'content': 'Return the required JSON object.',
             }],
-            'temperature': 0.6,
+            'temperature': 0.4,
             'top_p': 0.95,
-            'top_k': 20,
-            'min_p': 0.0,
-            'presence_penalty': 0.0,
-            'repetition_penalty': 1.0,
+            'top_k': 30,
+            'min_p': 0.05,
+            'presence_penalty': 0.05,
+            'repetition_penalty': 1.05,
             'seed': 0,
             'max_tokens': 8,
             'chat_template_kwargs': {'enable_thinking': QWEN_THINKING_ENABLED},
@@ -654,6 +658,39 @@ def phase_b_model_smoke_or_die():
         contract_choices = contract_response.get('choices') or []
         if not contract_choices:
             raise RuntimeError('Qwen production transport smoke returned no choices')
+
+        # Vision transport check: the agent attaches TWO images (raw + annotated)
+        # to every hypothesis call. Probe that exact multi-image shape here,
+        # before the scorecard opens, so a vLLM per-prompt image limit fails in
+        # Phase A diagnostics instead of silently zeroing the competition run.
+        tiny_png_b64 = (
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGA'
+            'hKmMIQAAAABJRU5ErkJggg=='
+        )
+        vision_payload = {
+            'model': QWEN_MODEL_NAME,
+            'messages': [{
+                'role': 'user',
+                'content': [
+                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + tiny_png_b64}},
+                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + tiny_png_b64}},
+                    {'type': 'text', 'text': 'How many images are attached? Answer with one digit.'},
+                ],
+            }],
+            'temperature': 0.0,
+            'top_p': 1.0,
+            'top_k': 0,
+            'max_tokens': 8,
+            'chat_template_kwargs': {'enable_thinking': False},
+        }
+        vision_response = _request_json(
+            VLLM_BASE_URL + '/chat/completions',
+            payload=vision_payload,
+            timeout=180,
+        )
+        vision_choices = vision_response.get('choices') or []
+        if not vision_choices:
+            raise RuntimeError('Qwen two-image vision smoke returned no choices')
         summary = {
             'status': 'ok',
             'elapsed_seconds': round(time.monotonic() - started, 3),
@@ -663,7 +700,9 @@ def phase_b_model_smoke_or_die():
             'production_transport_thinking_enabled': QWEN_THINKING_ENABLED,
             'production_transport_checked': True,
             'production_transport_finish_reason': contract_choices[0].get('finish_reason'),
-            'vision_input_checked': False,
+            'vision_input_checked': True,
+            'vision_two_images_checked': True,
+            'vision_finish_reason': vision_choices[0].get('finish_reason'),
             'validated_response_field': 'message.content_nonempty',
         }
         print('LCLD_QWEN_PHASE_B_MODEL_SMOKE=' + json.dumps(summary, sort_keys=True), flush=True)
@@ -676,7 +715,7 @@ def phase_b_model_smoke_or_die():
 def gateway_handshake_or_die():
     print('=== LCLD Phase B gateway handshake START ===', flush=True)
     url = os.environ.get('ARC_BASE_URL', 'http://gateway:8001/').rstrip('/') + '/api/games'
-    deadline = time.monotonic() + 600.0
+    deadline = time.monotonic() + 700.0
     last_error = ''
     while time.monotonic() < deadline:
         try:
@@ -696,4 +735,4 @@ def gateway_handshake_or_die():
         except Exception as exc:
             last_error = f'{type(exc).__name__}: {exc}'
         time.sleep(5.0)
-    raise RuntimeError('Kaggle gateway did not become ready within 600s: ' + last_error)
+    raise RuntimeError('Kaggle gateway did not become ready within 700s: ' + last_error)

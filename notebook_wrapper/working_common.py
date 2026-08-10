@@ -11,7 +11,7 @@ import time
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-MARKER = 'ARC_V8_3_QWEN36_27B_FP8_TUFA_VLLM_INITIAL_RESET'
+MARKER = 'ARC_V9_SAFE_HARNESS_THINKING32K_STATIC_SCHEMA_SERIAL_GATEWAY'
 VLLM_WHEELHOUSE_DATASET = 'driessmit1/arc3-vllm-h100-wheelhouse-v3'
 QWEN_MODEL_DATASET = 'driessmit1/vrfai-qwen3-6-27b-fp8-hf-snapshot'
 QWEN_MODEL_NAME = 'vrfai/Qwen3.6-27B-FP8'
@@ -20,11 +20,11 @@ VLLM_PORT = 1234
 VLLM_BASE_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/v1'
 VLLM_HEALTH_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/health'
 VLLM_STARTUP_TIMEOUT_SECONDS = 900
-VLLM_MAX_MODEL_LEN = 98304
-VLLM_MAX_NUM_SEQS = 1
+VLLM_MAX_MODEL_LEN = 131072
+VLLM_MAX_NUM_SEQS = 4
 VLLM_TENSOR_PARALLEL_SIZE = 1
 QWEN_MAX_INPUT_TOKENS = 65536
-QWEN_MAX_OUTPUT_TOKENS = 12288
+QWEN_MAX_OUTPUT_TOKENS = 49152
 VLLM_WHEELHOUSE_STAMP = 'vllm==0.19.0 torch==2.10.0 flashinfer==0.6.6\n'
 
 working_root = pathlib.Path('/kaggle/working')
@@ -34,8 +34,7 @@ vllm_process = None
 vllm_log_handle = None
 vllm_started_at = None
 
-# ARC must cache level-reset semantics before its competition client is created.
-os.environ['ONLY_RESET_LEVELS'] = 'true'
+# Competition RESET is defined by the gateway as a current-level reset.
 
 
 def _env_true(name):
@@ -84,10 +83,10 @@ def _assert_payload_structure():
     required = [
         code_dir / 'kaggle_agent.py',
         code_dir / 'submission.py',
-        code_dir / 'v8_agent' / '__init__.py',
-        code_dir / 'v8_agent' / 'session.py',
-        code_dir / 'v8_agent' / 'llm.py',
-        code_dir / 'v8_agent' / 'qwen_packet.py',
+        code_dir / 'v9_agent' / '__init__.py',
+        code_dir / 'v9_agent' / 'session.py',
+        code_dir / 'v9_agent' / 'llm.py',
+        code_dir / 'v9_agent' / 'qwen_packet.py',
     ]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
@@ -162,6 +161,8 @@ def _vllm_env():
         'TRANSFORMERS_NO_TF': '1',
         'TRANSFORMERS_NO_TORCHVISION': '1',
         'VLLM_NO_USAGE_STATS': '1',
+        'VLLM_XGRAMMAR_CACHE_MB': '64',
+        'VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS': '800',
     })
     return env
 
@@ -213,41 +214,43 @@ def _configure_qwen_env(model_path):
         'OPENAI_BASE_URL': VLLM_BASE_URL,
         'OPENAI_API_KEY': 'EMPTY',
         'VLLM_MODEL_PATH': str(model_path),
-        'VLLM_WORKER_MULTIPROC_METHOD': 'spawn',
         'ARC_QWEN_CONTEXT_TOKENS': str(VLLM_MAX_MODEL_LEN),
         'ARC_QWEN_MINIMUM_ACCEPTANCE_CONTEXT_TOKENS': '65536',
         'ARC_QWEN_MAX_INPUT_TOKENS': str(QWEN_MAX_INPUT_TOKENS),
         'ARC_QWEN_MAX_OUTPUT_TOKENS': str(QWEN_MAX_OUTPUT_TOKENS),
         'ARC_QWEN_RESERVED_RUNTIME_MARGIN_TOKENS': '8192',
         'ARC_QWEN_CONTEXT_RESERVED_MARGIN': '8192',
-        'ARC_QWEN_TIMEOUT_SECONDS': '500',
-        'ARC_LLM_TIMEOUT_SECONDS': '500',
-        'ARC_QWEN_ENABLE_THINKING': 'false',
-        'ARC_QWEN_REASONING_MODE': 'off',
-        'ARC_QWEN_REASONING_BUDGET_TOKENS': '0',
-        'ARC_QWEN_TEMPERATURE': '0.7',
+        'ARC_QWEN_TIMEOUT_SECONDS': '800',
+        'ARC_LLM_TIMEOUT_SECONDS': '800',
+        'ARC_QWEN_ENABLE_THINKING': 'true',
+        'ARC_QWEN_REASONING_MODE': 'on',
+        'ARC_QWEN_REASONING_BUDGET_TOKENS': '32000',
+        'ARC_QWEN_SCHEMA_MODE': 'static',
+        'ARC_QWEN_TEMPERATURE': '0.6',
         'ARC_QWEN_TOP_K': '20',
-        'ARC_QWEN_TOP_P': '0.8',
+        'ARC_QWEN_TOP_P': '0.95',
         'ARC_QWEN_MIN_P': '0.0',
-        'ARC_QWEN_PRESENCE_PENALTY': '1.5',
+        'ARC_QWEN_PRESENCE_PENALTY': '0.0',
         'ARC_QWEN_REPEAT_PENALTY': '1.0',
         'ARC_QWEN_SEED': '0',
         'ARC_QWEN_STRICT_REQUIRED': 'true',
         'LCLD_REQUIRE_QWEN_RUNTIME': '1',
         'ARC_QWEN_EMPTY_OUTPUT_RETRY_ENABLED': 'false',
-        'ARC_QWEN_TRACE_DIR': str(working_root / 'qwen_vllm_trace'),
-        'ARC_QWEN_MODEL_PROFILE_ID': 'vrfai_qwen3_6_27b_fp8_vllm_nonthinking',
+        'ARC_QWEN_MULTIMODAL_ENABLED': 'true',
+        'ARC_QWEN_TRACE_DIR': '',
+        'ARC_V8_TRACE_PATH': os.devnull,
+        'ARC_QWEN_MODEL_PROFILE_ID': 'vrfai_qwen3_6_27b_fp8_vllm_thinking_128k',
         'ARC_MAX_QWEN_PRIMARY_CALLS_PER_LEVEL': '1',
         'ARC_MAX_QWEN_REPLAN_CALLS_PER_LEVEL': '0',
         'ARC_MAX_QWEN_COORDINATE_CALLS_PER_LEVEL': '1',
         'ARC_MAX_TOTAL_QWEN_CALLS_PER_LEVEL': '2',
         'LCLD_MAX_ACTIONS_PER_GAME': '200',
-        'LCLD_MAX_ACTIONS_PER_LEVEL': '0',
+        'LCLD_MAX_ACTIONS_PER_LEVEL': '200',
         'LCLD_MAX_LEVEL_ATTEMPTS': '4',
-        'LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS': '6000',
-        'LCLD_TOTAL_GAME_WALL_CLOCK_LIMIT_SECONDS': '6000',
-        'LCLD_COMPETITION_WALL_CLOCK_LIMIT_SECONDS': '0',
-        'LCLD_COMPETITION_STOP_MARGIN_SECONDS': '0',
+        'LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS': '8000',
+        'LCLD_GAME_CONCURRENCY': '4',
+        'LCLD_COMPETITION_WALL_CLOCK_LIMIT_SECONDS': '30600',
+        'LCLD_COMPETITION_STOP_MARGIN_SECONDS': '60',
         'MPLBACKEND': 'agg',
         'ENVIRONMENTS_DIR': '/kaggle/input/competitions/arc-prize-2026-arc-agi-3/environment_files',
         'ARC_API_BASE': 'http://gateway:8001',
@@ -275,8 +278,10 @@ def _build_vllm_command(model_path):
         '--tool-call-parser', 'qwen3_coder',
         '--generation-config', 'vllm',
         '--enable-prefix-caching',
-        '--default-chat-template-kwargs', '{"preserve_thinking": true}',
+        '--mm-processor-cache-gb', '0',
+        '--default-chat-template-kwargs', '{"preserve_thinking": true, "enable_thinking": true}',
         '--reasoning-parser', 'qwen3',
+        '--reasoning-config', '{"reasoning_start_str":"<think>","reasoning_end_str":"I have to give the solution based on the reasoning directly now.</think>"}',
         '--max-model-len', str(VLLM_MAX_MODEL_LEN),
     ]
 
@@ -301,12 +306,18 @@ def vllm_server_ready():
 
 
 def _vllm_log_tail(limit=12000):
+    # Bounded read: never materialize the complete vLLM log in memory.
     log_path = working_root / 'vllm-qwen36.log'
     if not log_path.is_file():
         return ''
     try:
-        return log_path.read_text(encoding='utf-8', errors='replace')[-max(1, int(limit)):]
-    except OSError as exc:
+        byte_limit = max(1, int(limit))
+        with log_path.open('rb') as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - byte_limit), os.SEEK_SET)
+            return fh.read(byte_limit).decode('utf-8', errors='replace')
+    except (OSError, ValueError) as exc:
         return f'<unable to read vLLM log: {type(exc).__name__}: {exc}>'
 
 
@@ -366,22 +377,39 @@ def start_vllm_server(model_path, *, wait):
 
 
 def stop_vllm_server(timeout_seconds=30):
+    # Teardown must never override a completed competition run.
     global vllm_process, vllm_log_handle
-    if vllm_process is not None and vllm_process.poll() is None:
-        vllm_process.terminate()
-        try:
-            vllm_process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            vllm_process.kill()
-            vllm_process.wait(timeout=10)
-    vllm_process = None
-    os.environ.pop('ARC_QWEN_VLLM_PID', None)
-    if vllm_log_handle is not None:
-        try:
-            vllm_log_handle.close()
-        except Exception:
-            pass
-    vllm_log_handle = None
+    process = vllm_process
+    try:
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                process.wait(timeout=max(1, int(timeout_seconds)))
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except (OSError, ProcessLookupError):
+                    pass
+                try:
+                    process.wait(timeout=10)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+    except BaseException:
+        # The notebook result is more important than cleanup of an already-owned
+        # helper process; Kaggle will reap remaining descendants with the kernel.
+        pass
+    finally:
+        vllm_process = None
+        os.environ.pop('ARC_QWEN_VLLM_PID', None)
+        if vllm_log_handle is not None:
+            try:
+                vllm_log_handle.close()
+            except BaseException:
+                pass
+        vllm_log_handle = None
 
 
 def setup_arcade_client_env():
@@ -394,17 +422,15 @@ def setup_arcade_client_env():
         'ARC_API_BASE': 'http://gateway:8001',
         'ARC_BASE_URL': 'http://gateway:8001/',
         'OPERATION_MODE': 'competition',
-        'ONLY_RESET_LEVELS': 'true',
         'ENVIRONMENTS_DIR': '/kaggle/input/competitions/arc-prize-2026-arc-agi-3/environment_files',
         'RECORDINGS_DIR': '/kaggle/working/server_recording',
-        'LCLD_ENABLE_LOCAL_GAME_SOURCE_SIMULATION': '0',
         'LCLD_MAX_ACTIONS_PER_GAME': '200',
-        'LCLD_MAX_ACTIONS_PER_LEVEL': '0',
+        'LCLD_MAX_ACTIONS_PER_LEVEL': '200',
         'LCLD_MAX_LEVEL_ATTEMPTS': '4',
-        'LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS': '6000',
-        'LCLD_TOTAL_GAME_WALL_CLOCK_LIMIT_SECONDS': '6000',
-        'LCLD_COMPETITION_WALL_CLOCK_LIMIT_SECONDS': '0',
-        'LCLD_COMPETITION_STOP_MARGIN_SECONDS': '0',
+        'LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS': '8000',
+        'LCLD_GAME_CONCURRENCY': '4',
+        'LCLD_COMPETITION_WALL_CLOCK_LIMIT_SECONDS': '30600',
+        'LCLD_COMPETITION_STOP_MARGIN_SECONDS': '60',
     }
     os.environ.update(settings)
     env_path.write_text(
@@ -419,36 +445,51 @@ def structural_preflight():
     for root in (code_dir, (code_dir / 'src').resolve()):
         if str(root) not in sys.path:
             sys.path.insert(0, str(root))
-    for module_name in ('v8_agent.config', 'v8_agent.llm', 'v8_agent.qwen_packet', 'kaggle_agent', 'submission'):
+    for module_name in ('v9_agent.config', 'v9_agent.llm', 'v9_agent.qwen_packet', 'kaggle_agent', 'submission'):
         module = importlib.import_module(module_name)
         module_path = pathlib.Path(module.__file__).resolve()
         if not module_path.is_relative_to(code_dir):
             raise RuntimeError(f'{module_name} imported from unexpected path: {module_path}')
         print('[OK] import', module_name, '->', module_path, flush=True)
-    from v8_agent.config import config_from_mapping
+    from v9_agent.config import config_from_mapping
     config = config_from_mapping({})
     expected = {
         'qwen_backend': 'vllm',
-        'qwen_context_tokens': 98304,
+        'qwen_multimodal_enabled': True,
+        'qwen_context_tokens': 131072,
         'qwen_minimum_acceptance_context_tokens': 65536,
         'qwen_max_input_tokens': 65536,
-        'qwen_max_output_tokens': 12288,
-        'qwen_timeout_seconds': 500,
+        'qwen_max_output_tokens': 49152,
+        'qwen_timeout_seconds': 800,
+        'qwen_reasoning_budget_tokens': 32000,
         'max_actions_per_game': 200,
         'max_actions_per_level': 0,
         'max_level_attempts': 4,
-        'game_wall_clock_limit_seconds': 6000,
+        'game_wall_clock_limit_seconds': 8000,
     }
     mismatches = {key: (getattr(config, key), value) for key, value in expected.items() if getattr(config, key) != value}
     if mismatches:
         raise RuntimeError('LCLD Qwen preflight configuration mismatch: ' + repr(mismatches))
-    if config.qwen_vllm_model != QWEN_MODEL_NAME or config.qwen_enable_thinking:
+    if config.qwen_vllm_model != QWEN_MODEL_NAME or not config.qwen_enable_thinking:
         raise RuntimeError('Qwen vLLM model/thinking contract mismatch')
+    sampling_expected = {
+        'qwen_temperature': 0.6,
+        'qwen_top_p': 0.95,
+        'qwen_top_k': 20,
+        'qwen_presence_penalty': 0.0,
+    }
+    sampling_mismatches = {
+        key: (getattr(config, key), value)
+        for key, value in sampling_expected.items()
+        if getattr(config, key) != value
+    }
+    if sampling_mismatches:
+        raise RuntimeError('LCLD Qwen sampling configuration mismatch: ' + repr(sampling_mismatches))
     print('=== LCLD Qwen structural preflight OK ===', flush=True)
 
 
 def write_diagnostics_manifest(*, phase, runtime_info, arcade_env_path, heavy_diagnostics, qwen_probe):
-    manifest = {
+    return {
         'marker': MARKER,
         'phase': phase,
         'created_at_utc': _utc_now(),
@@ -464,15 +505,13 @@ def write_diagnostics_manifest(*, phase, runtime_info, arcade_env_path, heavy_di
         'max_input_tokens': QWEN_MAX_INPUT_TOKENS,
         'max_output_tokens': QWEN_MAX_OUTPUT_TOKENS,
         'max_num_seqs': VLLM_MAX_NUM_SEQS,
+        'reasoning_budget_tokens': int(os.environ.get('ARC_QWEN_REASONING_BUDGET_TOKENS', '0')),
+        'output_schema_mode': os.environ.get('ARC_QWEN_SCHEMA_MODE', 'static'),
         'runtime_info': runtime_info,
         'arcade_env_path': str(arcade_env_path),
         'heavy_diagnostics': bool(heavy_diagnostics),
         'model_smoke_requested': bool(qwen_probe),
     }
-    path = working_root / f'lcld_{phase}_diagnostics.json'
-    path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-    print(path.read_text(encoding='utf-8'), flush=True)
-    return manifest
 
 
 def setup_runtime(
@@ -530,42 +569,41 @@ def setup_runtime(
 
 
 def phase_b_model_smoke_or_die():
-    """Validate Qwen chat-template control and JSON-schema output before scorecard creation."""
+    """Run a minimal text-only inference probe before scorecard creation.
+
+    This deliberately does not test vision, reasoning extraction, or structured
+    output. Those are gameplay features and must not turn a pre-scorecard health
+    check into a long or parser-sensitive generation.
+    """
     wait_for_vllm_server(timeout_seconds=VLLM_STARTUP_TIMEOUT_SECONDS)
     payload = {
         'model': QWEN_MODEL_NAME,
-        'messages': [{'role': 'user', 'content': 'Return exactly {"action":"ACTION1"}.'}],
+        'messages': [{
+            'role': 'user',
+            'content': 'Reply with exactly OK.',
+        }],
         'temperature': 0.0,
-        'max_tokens': 128,
+        'top_p': 1.0,
+        'top_k': 0,
+        'max_tokens': 8,
         'chat_template_kwargs': {'enable_thinking': False},
-        'response_format': {
-            'type': 'json_schema',
-            'json_schema': {
-                'name': 'smoke_action',
-                'strict': True,
-                'schema': {
-                    'type': 'object',
-                    'properties': {'action': {'type': 'string', 'enum': ['ACTION1']}},
-                    'required': ['action'],
-                    'additionalProperties': False,
-                },
-            },
-        },
     }
     started = time.monotonic()
     try:
         response = _request_json(VLLM_BASE_URL + '/chat/completions', payload=payload, timeout=180)
         choices = response.get('choices') or []
-        content = str(((choices[0].get('message') or {}).get('content') if choices else '') or '')
-        decoded = json.loads(content)
-        if decoded != {'action': 'ACTION1'}:
-            raise RuntimeError('Unexpected Qwen smoke payload: ' + repr(decoded))
+        content = str(((choices[0].get('message') or {}).get('content') if choices else '') or '').strip()
+        if not content:
+            raise RuntimeError('Qwen smoke returned empty message.content')
         summary = {
             'status': 'ok',
             'elapsed_seconds': round(time.monotonic() - started, 3),
             'finish_reason': choices[0].get('finish_reason') if choices else None,
             'usage': response.get('usage'),
             'thinking_enabled': False,
+            'structured_output_checked': False,
+            'vision_input_checked': False,
+            'validated_response_field': 'message.content_nonempty',
         }
         print('LCLD_QWEN_PHASE_B_MODEL_SMOKE=' + json.dumps(summary, sort_keys=True), flush=True)
         return summary
@@ -573,7 +611,6 @@ def phase_b_model_smoke_or_die():
         print('=== QWEN PHASE-B MODEL SMOKE FATAL ===', flush=True)
         print(_vllm_log_tail(30000), flush=True)
         raise
-
 
 def gateway_handshake_or_die():
     print('=== LCLD Phase B gateway handshake START ===', flush=True)
