@@ -30,6 +30,13 @@ def choose_qwen_role(
         return None
     if research["missing_action_ids"]:
         return None
-    if can_call_qwen_role(QwenRole.PRIMARY, state.level_index, state.step_index, budget, config, ignore_spacing=urgent_no_candidate):
+    # PRIMARY is a replanning role: call it only when nothing executable
+    # remains. With per-attempt primary budget > 1 this gate is essential —
+    # otherwise the agent re-calls Qwen every `min_steps_between_qwen_calls`
+    # steps even while confirmed continuations are executing, burning expensive
+    # calls for zero benefit.
+    if has_candidate:
+        return None
+    if can_call_qwen_role(QwenRole.PRIMARY, state.level_index, state.step_index, budget, config, ignore_spacing=True):
         return QwenRole.PRIMARY
     return None

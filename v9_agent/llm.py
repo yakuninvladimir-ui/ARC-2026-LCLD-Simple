@@ -688,7 +688,8 @@ def _prompt(role: QwenRole, packet: dict[str, Any], config: V8Config | None = No
             coordinate_action_rules = (
                 "- A coordinate action run is one point interaction: it must include coordinate_candidate_id from execution_constraints.allowed_coordinate_candidate_ids and repeat must equal 1. Never encode click count or spatial distance as repeat. Omit coordinate_candidate_id for non-coordinate runs; use separate runs for different coordinate targets.\n"
                 "- One click per coordinate run does not mean one click per trajectory. When the evidence supports a multi-target configuration, include several ordered coordinate runs with distinct candidate IDs in the same complete trajectory. Do not default to a one-click hypothesis.\n"
-                "- A coordinate_candidate_id and its physical location_xy may each appear at most once in the primary trajectory. A prior research click is evidence and does not consume that target for goal execution.\n"
+                "- Accumulative mechanics: when a target must be clicked several times to reach a state (for example cycling a cell through colors), repeat its coordinate run up to 6 times in the trajectory, each as a separate run with repeat=1. Beyond 6 repeats of the same candidate or location the trajectory is rejected as ungrounded.\n"
+                "- A prior research click is evidence and does not consume that target for goal execution.\n"
             )
         header = (
             "You propose valid complete full action trajectories for a single interactive game level. "
@@ -704,7 +705,7 @@ def _prompt(role: QwenRole, packet: dict[str, Any], config: V8Config | None = No
             "When one transition changes available_action_ids and also changes repeated object-local center cells or local hex patches, treat both as one synchronous fact. Consider a latent active-object/control-state change; do not reduce the action's entire effect to action-surface change alone.\n"
             "For repeated spatial effects, derive the one-step vector from an object's before/after coordinates, start from its coordinates in OBJECT_LAYER, and calculate the complete repeat count needed by the hypothesis. Account for every object changed by the same action.\n"
             "MEMORY.completed_levels contains verified solutions from earlier levels of this game. Use their action ordering and confirmed mechanics as evidence, but historical object IDs are level-local and must not be reused as current IDs.\n"
-            "MEMORY.attempts contains completed failed attempts. research_action_runs are evidence collection, not failed goal trajectories and may be reused as a prefix when needed. rejected_proposals gives the exact prior candidate and verifier reason. Never repeat a rejected_proposal or any trajectory marked exact_replay_forbidden unchanged; repair the stated failure. For an availability rejection, insert an observed enabling action before trajectory_step_index_1_based and then continue from the resulting action surface.\n"
+            "MEMORY.attempts contains completed failed attempts. research_action_runs are evidence collection, not failed goal trajectories and may be reused as a prefix when needed. rejected_proposals gives the exact prior candidate and verifier reason. Compare new hypotheses against rejected_proposals; generate only those paths not present in the rejection list. If a proposal was rejected due to unavailability, insert the observed enabling action before trajectory_step_index_1_based and then continue from the resulting action surface.\n"
             "MEMORY.semantic_feedback reports how prior proposals were bound and evaluated. Preserve corrected source/reference roles, do not exactly replay trajectories marked FORBIDDEN or IRRELEVANT, and use CONFIRMED invariants to refine action counts or ordering.\n"
             "Every proposed hypothesis must be a complete_candidate with the full ordered action sequence from the current state; do not return a prefix or request later re-planning.\n"
             "One hypothesis may cover several source/reference pairs and necessary intermediate configurations. Do not split a multi-object solution into separate model calls.\n"
@@ -718,7 +719,7 @@ def _prompt(role: QwenRole, packet: dict[str, Any], config: V8Config | None = No
             "- OBJECT_LAYER.component_graph partitions the current frame into same-color 4-connected components. Components are geometric evidence, not gameplay roles. Use only object IDs in execution_constraints.allowed_object_ids in response fields.\n"
             "- OBJECT_LAYER.objects gives current coordinates, bbox, colors, and geometry. exact_geometry_groups and shape hashes describe geometry only; they are not goals.\n"
             "- HEX_PATCHES are exact current local 0-F crops only for multicolor or segmentation-ambiguous objects. They do not replace the global PNG.\n"
-            "- ACTION_DIFFS contains no assigned action semantics. Each flat before/after record is a direct sample execution; observation_summary only groups other executions with the same action, action surface, normalized object deltas, color transitions, and level result. synchronous_local_visual_evidence contains exact bounded 3x3 hex before/after patches from that same transition. In object_changes, shared_attributes applies identically to both before and after; other attributes remain in their respective state. Rare collisions, lifecycle changes, and surface changes remain separate groups. An empty object_changes list does not override a nonempty pixel_diff.\n"
+            "- ACTION_DIFFS contains no assigned action semantics. Each flat before/after record is a direct sample execution; observation_summary only groups other executions with the same action, action surface, normalized object deltas, color transitions, and level result. synchronous_local_visual_evidence contains exact bounded 3x3 hex before/after patches from that same transition. In object_changes, shared_attributes applies identically to both before and after; other attributes remain in their respective state. Rare collisions, lifecycle changes, and surface changes remain separate groups. An empty object_changes list does not override a nonempty pixel_diff. derived_object_effects and effect_digest are exact arithmetic compressions of the same record (per-object centroid movement dx/dy, area delta, recolor, lifecycle; cells changed outside tracked objects are UI/counter/background noise) — read them first, then drill into raw fields only when needed.\n"
             "- In pixel_diff, sparse_cells_xy lists individual [x,y] cells; row_runs uses y plus an inclusive x range and equal-length before/after palette strings. They are complete exact encodings only when position_data_complete is true. Otherwise changed_cell_count, changed_bbox_xyxy, color_transitions, and the listed evenly sampled runs remain factual but the omitted run positions must not be invented.\n"
             "- available_action_ids records legality in that observed state. A change in that list is a fact, not an explanation of why it changed.\n"
             "- STATE.trajectory_start is authoritative: CURRENT_FRAME_PNG, OBJECT_LAYER, and ACTION_SPACE.current_available_action_ids all refer to the same execution-start state. Research diffs marked history-only must be replayed inside the trajectory when their state is required.\n"
@@ -729,74 +730,168 @@ def _prompt(role: QwenRole, packet: dict[str, Any], config: V8Config | None = No
             "- The goal is unknown. Lower confidence when needed, but never replace a complete trajectory with a prefix or an empty response."
         )
     output_contract = _compact_output_contract(role)
+    failure_block = _failure_avoidance_block(packet) if role is not QwenRole.COORDINATE else ""
+    
+    # ---- Data Dictionary (сокращённый эпистемологический блок) ----
+    data_dict = (
+        "DATA DICTIONARY:\n"
+        "- ATTACHED IMAGES: two renders of the SAME current frame, in order. IMAGE_1 (CURRENT_FRAME_PNG): raw logical grid, ground-truth pixels, nothing overlaid. IMAGE_2 (ANNOTATED_FRAME_PNG): same grid with planning-object bounding boxes and labels (obj0, obj1, ...) drawn on top; overlays may cover pixels, so resolve any occlusion via IMAGE_1. If only one image is attached, it is the one marked ATTACHED_IMAGE_1.\n"
+        "- OBJECT_LAYER: current-frame parse with geometry, coordinates, colors, connectivity; no gameplay roles. Its object ids are the labels painted on IMAGE_2.\n"
+        "- HEX_PATCHES: exact local categorical cells where color detail or segmentation is ambiguous.\n"
+        "- ACTION_DIFFS: observed changes in pixels, objects, and available actions; no action interpretation. effect_digest/derived_object_effects are the exact per-action movement/recolor summary.\n"
+        "- MEMORY: verified completed-level solutions, attempt outcomes, confirmed effects, bounded reverse semantic feedback; no historical PNG frames.\n"
+        "- You may propose action IDs and candidate trajectories inside the JSON response.\n"
+        "- You do not execute or authorize actions; the agent validates candidates and re-observes after each step."
+    )
+    
+    # ---- Сборка промпта ----
     parts = [
         header,
         "",
-        "DATA AUTHORITY:",
-        "- CURRENT_FRAME_PNG is the single latest global frame. When available_to_configured_backend is true, its data is attachment current_frame_png; otherwise the text model must rely on OBJECT_LAYER and HEX_PATCHES.",
-        "- OBJECT_LAYER is a deterministic current-frame parse. It contains geometry, coordinates, colors, and connectivity, not gameplay-role labels.",
-        "- HEX_PATCHES contains exact local categorical cells only where color detail or segmentation is ambiguous.",
-        "- ACTION_DIFFS contains direct observed changes in pixels, objects, and available actions. It intentionally contains no action interpretation.",
-        "- MEMORY contains verified completed-level solutions, attempt outcomes, confirmed effects, and bounded reverse semantic feedback with explicit authority/status. It contains no historical PNG frames.",
-        "- You may propose action IDs and candidate trajectories inside the JSON response.",
-        "- You do not execute or authorize actions.",
-        "- The agent validates the candidate before execution and re-observes after every executed step.",
+        data_dict,
         "",
         precondition,
         "",
         task,
         "",
+        *([failure_block, ""] if failure_block else []),
         "OBSERVATION_PACKET_JSON=",
         json.dumps(_packet_for_text_prompt(packet), ensure_ascii=False, sort_keys=False, separators=(",", ":")),
         "",
         "OUTPUT_CONTRACT=",
         output_contract,
         "",
-        "Return exactly one valid JSON object.",
-        "Do not return markdown.",
-        "Do not return prose outside JSON.",
+        "Return exactly one valid JSON object and no other text.",
         "RETURN_JSON_ONLY",
     ]
     return "\n".join(parts)
 
 
 def _packet_without_embedded_images(packet: dict[str, Any]) -> dict[str, Any]:
-    """Deep-copy a packet without ever copying the potentially large PNG string."""
+    """Deep-copy a packet without large PNG bytes or offline-only verifier state."""
     projected = dict(packet)
-    frame = packet.get("current_frame_png")
-    if isinstance(frame, dict):
-        projected["current_frame_png"] = {
-            key: value
-            for key, value in frame.items()
-            if key != "data_base64"
-        }
+    # Offline dual-view verifier packet is consumed by TrajectoryVerifier in-process.
+    # Never serialize full_grid_hex_rows + probe dumps into the model prompt.
+    projected.pop("verifier_packet", None)
+    for key in ("current_frame_png", "annotated_frame_png"):
+        frame = packet.get(key)
+        if isinstance(frame, dict):
+            projected[key] = {
+                field: value
+                for field, value in frame.items()
+                if field != "data_base64"
+            }
     return deepcopy(projected)
 
 
 def _packet_for_text_prompt(packet: dict[str, Any]) -> dict[str, Any]:
     projected = _packet_without_embedded_images(packet)
-    frame = projected.get("current_frame_png")
-    if isinstance(frame, dict):
-        frame["attachment_status"] = (
-            "ATTACHED_IMAGE:current_frame_png"
-            if frame.get("available_to_configured_backend")
-            else "NOT_ATTACHED:configured_backend_has_no_vision"
-        )
+    attached_keys: list[str] = []
+    raw = packet.get("current_frame_png")
+    if isinstance(raw, dict) and raw.get("data_base64"):
+        attached_keys.append("current_frame_png")
+    annotated = packet.get("annotated_frame_png")
+    if isinstance(annotated, dict) and annotated.get("data_base64"):
+        attached_keys.append("annotated_frame_png")
+    for key, attachment_id in (
+        ("current_frame_png", "current_frame_png"),
+        ("annotated_frame_png", "annotated_frame_png"),
+    ):
+        frame = projected.get(key)
+        if isinstance(frame, dict):
+            if key in attached_keys and frame.get("available_to_configured_backend"):
+                frame["attachment_status"] = f"ATTACHED_IMAGE_{attached_keys.index(key) + 1}:{attachment_id}"
+            elif key in attached_keys:
+                frame["attachment_status"] = "NOT_ATTACHED:configured_backend_has_no_vision"
+            else:
+                frame["attachment_status"] = "NOT_RENDERED:no_image_payload"
+    # Compact dual-view note so the model still knows the offline contour exists.
+    if isinstance(packet.get("dual_view"), dict):
+        projected["dual_view"] = dict(packet["dual_view"])
+        projected["dual_view"]["verifier_packet_status"] = "offline_only_not_in_model_prompt"
     return projected
 
 
 def _packet_image_payloads(packet: dict[str, Any]) -> list[str]:
-    frame = packet.get("current_frame_png")
-    if not isinstance(frame, dict):
-        return []
-    payload = frame.get("data_base64")
-    return [str(payload)] if isinstance(payload, str) and payload else []
+    # Dual-view attach policy (owner directive 2026-08): the model receives BOTH
+    # views of the same frame as an ordered pair — image 1 is the raw logical
+    # grid (ground truth pixels), image 2 is the annotated render with
+    # planning-object bboxes/labels drawn on top. The annotated view can
+    # occlude pixels under overlays, so the raw view stays attached as the
+    # occlusion-free reference; the pair costs one extra small image and buys
+    # unambiguous label-to-pixel grounding. If only one view exists, attach it.
+    images: list[str] = []
+    raw = packet.get("current_frame_png")
+    if isinstance(raw, dict):
+        payload = raw.get("data_base64")
+        if isinstance(payload, str) and payload:
+            images.append(payload)
+    annotated = packet.get("annotated_frame_png")
+    if isinstance(annotated, dict):
+        payload = annotated.get("data_base64")
+        if isinstance(payload, str) and payload:
+            images.append(payload)
+    return images
 
 
 def _set_packet_image_availability(packet: dict[str, Any], available: bool) -> None:
-    frame = packet.get("current_frame_png")
-    if isinstance(frame, dict):
-        frame["available_to_configured_backend"] = bool(available)
+    for key in ("current_frame_png", "annotated_frame_png"):
+        frame = packet.get(key)
+        if isinstance(frame, dict):
+            frame["available_to_configured_backend"] = bool(available)
+
+
+def _failure_avoidance_block(packet: dict[str, Any]) -> str:
+    """Render a hard anti-repeat block from attempt memory.
+
+    Live DashScope runs showed small VL models rephrase the same failed
+    hypothesis for every attempt; the deterministic repeat-rejector then burns
+    the whole per-attempt call budget. Naming the failed action sequences
+    explicitly gives the model a concrete diff target.
+    """
+    memory = packet.get("memory") if isinstance(packet, dict) else None
+    if not isinstance(memory, dict):
+        return ""
+    attempts = memory.get("attempts")
+    if not isinstance(attempts, dict):
+        return ""
+    entries: list[str] = []
+    seen: set[tuple[str, ...]] = set()
+
+    def _add(actions: Any, verdict: str) -> None:
+        if not isinstance(actions, list) or not actions:
+            return
+        seq = tuple(str(a) for a in actions[:24])
+        if seq in seen:
+            return
+        seen.add(seq)
+        entries.append(f"{len(entries) + 1}. actions=[{', '.join(seq)}] — {verdict}")
+
+    feedback = attempts.get("current_attempt_feedback")
+    if isinstance(feedback, dict):
+        for hyp in (feedback.get("hypotheses") or [])[:6]:
+            if isinstance(hyp, dict):
+                _add(hyp.get("actions"), f"verdict {hyp.get('truth')}/{hyp.get('progress')} ({hyp.get('queue')})")
+        for rej in (feedback.get("rejections") or [])[:4]:
+            if isinstance(rej, dict):
+                _add(rej.get("actions"), f"rejected: {rej.get('reason')}")
+    for prev in (attempts.get("previous_failed_attempts") or [])[:3]:
+        if not isinstance(prev, dict):
+            continue
+        for hyp in (prev.get("hypotheses") or [])[:3]:
+            if isinstance(hyp, dict):
+                _add(hyp.get("actions"), f"prior attempt {hyp.get('truth')}/{hyp.get('progress')}")
+    if not entries:
+        return ""
+    entries = entries[:6]
+    return (
+        "ATTEMPT HISTORY — AUTO-REJECT CHECK:\n"
+        "These action sequences already failed on this level (executed and judged, or rejected by the verifier):\n"
+        + "\n".join(entries)
+        + "\nA new hypothesis whose action sequence matches a listed one is auto-rejected without execution. "
+        "Your next hypothesis MUST differ in at least one of: objective kind, target objects, or action sequence. "
+        "If every grounded idea has failed, propose the strongest remaining untried interpretation with low confidence instead of rephrasing a listed failure."
+    )
 
 
 def _compact_output_contract(role: QwenRole) -> str:
@@ -805,15 +900,20 @@ def _compact_output_contract(role: QwenRole) -> str:
             "Return schema_version=v8.4.coordinate_plan, decision=PLAN, "
             "mechanism_hypothesis, coordinate_action_id, candidate_sequence "
             "of objects containing coordinate_candidate_id, completion_criterion, "
-            "and confidence. Use only IDs whitelisted in OBSERVATION_PACKET_JSON."
+            "and confidence. Use only IDs whitelisted in OBSERVATION_PACKET_JSON. "
+            "Each candidate's observed_outcome (when present) reports empirical click "
+            "history at that exact target: never re-propose a candidate flagged "
+            "avoid_exact_repeat_no_effect, and prefer repeating candidates flagged "
+            "repeat_showed_positive_effect when the mechanic requires accumulation."
         )
     return (
         "Return schema_version=v8.7.semantic_trajectories, decision=PROPOSE, and "
         "1-3 hypotheses. Each hypothesis contains id, family, objective with kind/"
-        "source_objects/reference_objects/description, relations, basis, action_runs "
+        "source_objects/reference_objects/description and optional target_xy [x, y], "
+        "relations, basis, action_runs "
         "with action_id/repeat and optional coordinate_candidate_id, "
         "status=complete_candidate, uncertainty, and confidence. Use only IDs "
-        "whitelisted in OBSERVATION_PACKET_JSON."
+        "whitelisted in OBSERVATION_PACKET_JSON. Include an optional goal_spec object or goal_signature when available (expected_final_state_hash, expected_grid_hex_rows, or target_xy/object_id) to help the verifier plan."
     )
 
 def _output_schema_mode() -> str:
@@ -929,6 +1029,13 @@ def _static_output_schema(role: QwenRole) -> dict[str, Any]:
             "source_objects": _static_id_array_schema(max_items=6),
             "reference_objects": _static_id_array_schema(max_items=6),
             "description": {"type": "string", "minLength": 1, "maxLength": 240},
+            "target_xy": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 0, "maximum": 1023},
+                "minItems": 2,
+                "maxItems": 2,
+                "description": "Optional [x, y] grid coordinate of the objective target.",
+            },
         },
     }
     hypothesis_schema = {
@@ -958,6 +1065,18 @@ def _static_output_schema(role: QwenRole) -> dict[str, Any]:
                 ]
             },
             "objective": objective_schema,
+            "goal_spec": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [],
+                "properties": {
+                    "expected_final_state_hash": {"type": "string", "maxLength": 128},
+                    "goal_signature": {"type": "string", "maxLength": 128},
+                    "object_id": _static_id_schema(max_length=128),
+                    "target_xy": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
+                    "description": {"type": "string", "maxLength": 240},
+                },
+            },
             "relations": _static_id_array_schema(max_items=6),
             "basis": {"type": "string", "minLength": 1, "maxLength": 360},
             "action_runs": {
@@ -1081,6 +1200,13 @@ def _dynamic_enum_output_schema(role: QwenRole, packet: dict[str, Any] | None = 
                 "maxItems": min(6, len(object_ids)),
             },
             "description": {"type": "string", "minLength": 1, "maxLength": 240},
+            "target_xy": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 0, "maximum": 1023},
+                "minItems": 2,
+                "maxItems": 2,
+                "description": "Optional [x, y] grid coordinate of the objective target.",
+            },
         },
     }
     hypothesis_schema = {
@@ -1110,6 +1236,24 @@ def _dynamic_enum_output_schema(role: QwenRole, packet: dict[str, Any] | None = 
                 ]
             },
             "objective": objective_schema,
+            "goal_spec": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [],
+                "properties": {
+                    "expected_final_state_hash": {"type": "string", "maxLength": 128},
+                    "goal_signature": {"type": "string", "maxLength": 128},
+                    "object_id": _enum_schema(object_ids),
+                    "target_xy": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
+                    "description": {"type": "string", "maxLength": 240},
+                    "expected_grid_hex_rows": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "minLength": 1},
+                        "description": "Optional expected grid hex rows for the hypothesized final state.",
+                    },
+                },
+            },
             "relations": {
                 **_array_enum_schema(relation_ids),
                 "maxItems": min(6, len(relation_ids)),
@@ -1282,6 +1426,11 @@ def _repair_v88_references(packet: dict[str, Any]) -> None:
                 item for item in diff.get("object_changes") or []
                 if isinstance(item, dict) and str(item.get("object_id")) in object_ids
             ]
+            if isinstance(diff.get("derived_object_effects"), list):
+                diff["derived_object_effects"] = [
+                    item for item in diff["derived_object_effects"]
+                    if isinstance(item, dict) and str(item.get("object_id")) in object_ids
+                ]
     action_space = packet.setdefault("action_space", {})
     candidates = [
         item for item in action_space.get("coordinate_candidates") or []
@@ -1612,6 +1761,19 @@ def _extract_json(text: str, *, role: QwenRole | None = None) -> dict[str, Any]:
     raw = text.strip()
     if not raw:
         return {}
+    # Сначала пробуем извлечь из markdown-блока
+    markdown_pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
+    match = re.search(markdown_pattern, raw, re.DOTALL | re.IGNORECASE)
+    if match:
+        candidate = match.group(1).strip()
+        try:
+            value = json.loads(candidate)
+            normalized = _normalize_qwen_output(value, role=role)
+            if normalized:
+                return normalized
+        except json.JSONDecodeError:
+            pass
+    # Если не вышло, пробуем обычный парсинг
     return _extract_json_from_region(raw, role=role)
 
 
@@ -1868,18 +2030,37 @@ def _validate_v87_semantic_output(value: dict[str, Any]) -> bool:
     families = {"object_correspondence", "spatial_configuration", "pattern_transformation", "interaction_sequence", "action_surface_change", "other"}
     objective_kinds = {"match_or_overlap", "relative_arrangement", "containment", "connection", "pattern_or_state", "select_or_activate", "surface_change", "other"}
     statuses = {"complete_candidate"}
-    required = {"id", "family", "objective", "relations", "basis", "actions", "status", "uncertainty", "confidence"}
+    required = {"id", "family", "objective", "relations", "basis", "status", "uncertainty", "confidence"}
+    # The prompt invites an optional goal_spec/goal_signature, and action_runs
+    # make the legacy flat actions list redundant (it is derived by expanding
+    # runs). Accept both forms instead of rejecting well-formed hypotheses
+    # from models that follow the prompt rather than the exact key set.
+    allowed_keys = required | {"actions", "action_runs", "goal_spec", "goal_signature"}
     objective_required = {"kind", "source_objects", "reference_objects", "description"}
+    # Models naturally attach a target coordinate hint to the objective
+    # (observed live from qwen3.8-max). It is optional, but when present and
+    # well-formed it is valuable for grounding; when malformed we strip it
+    # instead of rejecting the whole hypothesis.
+    objective_optional = {"target_xy"}
     for item in hypotheses:
-        if not isinstance(item, dict) or frozenset(item) not in {frozenset(required), frozenset(required | {"action_runs"})}:
+        if not isinstance(item, dict) or not required.issubset(item) or (set(item) - allowed_keys):
+            return False
+        if item.get("actions") is None and item.get("action_runs") is None:
             return False
         if not isinstance(item.get("id"), str) or not (1 <= len(item["id"]) <= 64):
             return False
         if item.get("family") not in families or item.get("status") not in statuses:
             return False
         objective = item.get("objective")
-        if not isinstance(objective, dict) or set(objective) != objective_required:
+        if not isinstance(objective, dict) or not objective_required.issubset(objective) or (set(objective) - objective_required - objective_optional):
             return False
+        target_xy = objective.get("target_xy")
+        if target_xy is not None and (
+            not isinstance(target_xy, (list, tuple))
+            or len(target_xy) != 2
+            or any(not isinstance(v, int) or isinstance(v, bool) or v < 0 or v > 1023 for v in target_xy)
+        ):
+            objective.pop("target_xy", None)
         if objective.get("kind") not in objective_kinds:
             return False
         if not _valid_string_array(objective.get("source_objects"), max_items=6):
@@ -1892,7 +2073,7 @@ def _validate_v87_semantic_output(value: dict[str, Any]) -> bool:
             return False
         if not isinstance(item.get("basis"), str) or not (1 <= len(item["basis"]) <= 720):
             return False
-        if not _valid_string_array(item.get("actions"), min_items=1, max_items=50, unique=False):
+        if item.get("actions") is not None and not _valid_string_array(item.get("actions"), min_items=1, max_items=50, unique=False):
             return False
         action_runs = item.get("action_runs")
         if action_runs is not None:
@@ -1918,7 +2099,7 @@ def _validate_v87_semantic_output(value: dict[str, Any]) -> bool:
                 expanded_actions.extend([action_id] * repeat)
                 if len(expanded_actions) > 50:
                     return False
-            if expanded_actions != item.get("actions"):
+            if item.get("actions") is not None and expanded_actions != item.get("actions"):
                 return False
         if not isinstance(item.get("uncertainty"), str) or len(item["uncertainty"]) > 480:
             return False

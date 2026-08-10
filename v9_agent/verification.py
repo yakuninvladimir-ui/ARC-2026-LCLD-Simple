@@ -55,8 +55,6 @@ class VerificationBinder:
             region = first.bbox_rc
             target_signature = stable_hash(tuple(objects[object_id].stable_hash for object_id in resolved), "targetobjs_")
 
-        kind = _select_contract_kind(step, has_relation=bool(target_relation_ids), has_object=bool(target_object_ids))
-        candidate = None
         if step.coordinate_candidate_id:
             candidate = next((c for c in snapshot.coordinate_targets if c.candidate_id == step.coordinate_candidate_id), None)
             if candidate is None:
@@ -75,6 +73,11 @@ class VerificationBinder:
                     metric_name = relation.metric_name
                     before_metric = relation.metric_value
                     target_signature = candidate.target_signature or relation.relation_signature
+
+        # Contract kind is selected only after every target source (step ids,
+        # relation endpoints, coordinate candidate) has resolved, so kind guards
+        # see the final target set.
+        kind = _select_contract_kind(step, has_relation=bool(target_relation_ids), has_object=bool(target_object_ids))
 
         question_type = _question_type(kind)
         question_id = stable_hash((question_type.value, step.action_id, target_signature or "global"), "q_")
@@ -188,17 +191,39 @@ def changed_cells_in_regions(cells: Iterable[tuple[int, int]], regions: Iterable
 def _select_contract_kind(step: TestStep, *, has_relation: bool, has_object: bool) -> VerificationContractKind:
     explicit = str(step.contract_kind or "").upper()
     try:
-        return VerificationContractKind(explicit)
+        explicit_kind: VerificationContractKind | None = VerificationContractKind(explicit)
     except ValueError:
-        pass
+        explicit_kind = None
+    if explicit_kind is not None:
+        # Explicit kinds are honored only when their measurable targets exist.
+        # A targetless displacement/relation/local-change contract can never
+        # MATCH and would poison the empiric judgment with a guaranteed MISMATCH.
+        if explicit_kind is VerificationContractKind.OBJECT_DISPLACEMENT and not has_object:
+            return VerificationContractKind.ACTION_EFFECT_DISCOVERY
+        if explicit_kind is VerificationContractKind.RELATION_ERROR_DECREASE and not has_relation:
+            return VerificationContractKind.ACTION_EFFECT_DISCOVERY
+        if explicit_kind is VerificationContractKind.LOCAL_TARGET_CHANGE and not (has_object or has_relation):
+            return VerificationContractKind.ACTION_EFFECT_DISCOVERY
+        return explicit_kind
     text = f"{step.kind} {step.expected_observation or ''}".lower()
     expected_type = _expected_type_from_text(text)
     if expected_type == "target_change":
-        return VerificationContractKind.LOCAL_TARGET_CHANGE
+        # A local-change contract without any target region is unjudgeable;
+        # fall through to typed effect discovery instead.
+        if has_object or has_relation:
+            return VerificationContractKind.LOCAL_TARGET_CHANGE
+        return VerificationContractKind.ACTION_EFFECT_DISCOVERY
     if expected_type == "object_move":
-        return VerificationContractKind.OBJECT_DISPLACEMENT
+        # Displacement is only measurable when a tracked target object exists.
+        # A targetless displacement contract can never MATCH and poisons the
+        # empiric judgment with a guaranteed tracking MISMATCH.
+        if has_object:
+            return VerificationContractKind.OBJECT_DISPLACEMENT
+        return VerificationContractKind.ACTION_EFFECT_DISCOVERY
     if expected_type == "relation_improvement":
-        return VerificationContractKind.RELATION_ERROR_DECREASE
+        if has_relation:
+            return VerificationContractKind.RELATION_ERROR_DECREASE
+        return VerificationContractKind.ACTION_EFFECT_DISCOVERY
     if expected_type == "action_surface_change":
         return VerificationContractKind.ACTION_SURFACE_CHANGE
     if expected_type == "score_or_terminal":

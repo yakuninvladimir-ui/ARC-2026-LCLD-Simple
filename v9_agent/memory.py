@@ -381,14 +381,32 @@ class GameMemory:
         required = self.required_action_research_ids(snapshot)
         coordinate = set(str(action_id) for action_id in (getattr(snapshot, "coordinate_action_ids", ()) or ()))
         undo = set(str(action_id) for action_id in (getattr(snapshot, "undo_action_ids", ()) or ()))
-        observed = {
-            str(record.action_id)
-            for record in self.action_effects.values()
-            if float(getattr(record, "confidence", 0.0) or 0.0) >= 0.45
-        }
+        current_level = int(getattr(snapshot, "level_index", 0) or 0)
+        records_by_action: dict[str, list[Any]] = {}
+        for record in self.action_effects.values():
+            if float(getattr(record, "confidence", 0.0) or 0.0) >= 0.45:
+                records_by_action.setdefault(str(record.action_id), []).append(record)
         # Undo semantics are supplied by the environment contract. Executing undo as
         # an exploratory action would spend a move and destroy the probe chronology.
-        researched_set = observed | undo
+        researched_set = set(undo)
+        for action_id, records in records_by_action.items():
+            # A visible effect (even a negative or score-neutral one) identifies the
+            # mechanic and persists for the whole game. A *non-revealing* outcome
+            # ("no_effect", "not_moved", "unchanged") only proves the action did
+            # nothing in the state where it was tried: effects may be conditional on
+            # level state (e.g. click/cycle selection in ar25 only becomes meaningful
+            # once multiple selectable pieces exist). Such knowledge expires at the
+            # level boundary and the action is scheduled for reprobe on the new level.
+            revealing = any(str(getattr(r, "outcome", "") or "") in _REVEALING_EFFECT_OUTCOMES for r in records)
+            if revealing:
+                researched_set.add(action_id)
+                continue
+            last_level = max(int(getattr(r, "level_index", 0) or 0) for r in records)
+            if last_level >= current_level:
+                # Already (re)probed on this level: no visible effect here is a
+                # fact about THIS level's state, do not reprobe again until the
+                # next level boundary.
+                researched_set.add(action_id)
         researched = [action_id for action_id in required if action_id in researched_set]
         missing = [action_id for action_id in required if action_id not in researched_set]
         return {
@@ -1612,6 +1630,13 @@ def _summary(j: Judgment) -> str:
         f"mechanic={j.mechanic_result.value}, progress={j.progress.value}, semantic={j.semantic_judgment.value}, "
         f"reason={j.reason_code}, ig={j.observed_information_gain:.3f}"
     )
+
+
+# Outcomes that reveal an action's mechanic (a visible state change happened).
+# Everything else ("no_effect", "not_moved", "unchanged", ...) only proves the
+# action did nothing in the state where it was tried and expires at level
+# boundaries — see GameMemory.action_research_status.
+_REVEALING_EFFECT_OUTCOMES = frozenset({"effect", "negative_effect", "no_progress"})
 
 
 def _effect_outcome(judgment: Judgment) -> str:

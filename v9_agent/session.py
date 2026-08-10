@@ -18,7 +18,14 @@ from .observe import stable_hash
 from .policy import Policy
 from .qwen_packet import QwenPacketBuilder, QwenPacketNotReady
 from .qwen_roles import record_qwen_call
-from .types import CandidateAction, PendingAction, QwenBudgetState, QwenRole
+from .types import CandidateAction, PendingAction, QwenBudgetState, QwenRole, Validity
+from .trajectory import TrajectoryVerifier, rebind_plan_to_test_steps
+from .planning_set import (
+    PlanningSet,
+    assert_dual_view_identity,
+    build_planning_set_from_packet,
+    build_planning_set_from_snapshot,
+)
 
 
 _ATTEMPT_RETRY_RESET_SOURCES = {"game_over_level_reset", "failed_attempt_reset"}
@@ -60,6 +67,8 @@ class GameSession:
         self._last_level_index: int | None = None
         self._last_levels_completed: int = 0
         self._action_count_this_game = 0
+        self._qwen_successful_calls_this_game = 0
+        self._qwen_empty_primary_streak = 0
         self._game_over_resets_this_game = 0
         self._game_over_resets_by_level: dict[int, int] = defaultdict(int)
         self._attempt_index_by_level: dict[int, int] = defaultdict(int)
@@ -74,6 +83,13 @@ class GameSession:
         self._synthetic_step_index = -1
         self._last_action_selection: dict[str, Any] = {}
         self._alternative_hypothesis_resets_this_game = 0
+        # Consecutive fallback/liveness emits per level; a long streak with Qwen
+        # already spent and no recent positive progress means the attempt is
+        # dead — reset with retained feedback instead of flailing (spec §10-11).
+        self._fallback_streak_by_level: dict[int, int] = defaultdict(int)
+        # Single owner of dual-view identity for the current snapshot cycle.
+        self._planning_set: PlanningSet | None = None
+        self._planning_set_snapshot_id: str | None = None
 
     def update_runtime_config(self, updates: Mapping[str, Any] | None) -> None:
         if not updates:
@@ -175,19 +191,25 @@ class GameSession:
         if role is not None:
             self._call_qwen_role(role, snapshot, state)
 
+        research = self.memory.action_research_status(snapshot)
+        allow_semantic = not bool(research.get("missing_simple_action_ids"))
         candidate = None
         preflight = None
         seen_rejections: set[str] = set()
         for _ in range(max(8, self.config.max_active_hypotheses_in_packet + 8)):
-            candidate = self.policy.choose_action(snapshot, self.memory, self.bank, self.explorer, self.config)
+            candidate = self.policy.choose_action(snapshot, self.memory, self.bank, self.explorer, self.config, allow_semantic=allow_semantic)
             if candidate is None:
-                research = self.memory.action_research_status(snapshot)
+                # Last-resort memory-aware fallback so empty queues do not hard-crash
+                # the competition child before any accepted gateway action.
+                fallback = self.policy.safe_fallback(snapshot, self.memory, self.config)
                 self._last_action_selection = {
                     "verifier_exhausted": True,
-                    "fallback_enabled": False,
+                    "fallback_enabled": True,
+                    "fallback_action": fallback.to_arc_action() if fallback is not None else None,
                     "level_index": state.level_index,
                     "step_index": state.step_index,
                     "semantic_queue_count": len(self.bank.semantic_test_queue),
+                    "verified_semantic_count": len(self.bank.verified_semantic),
                     "coordinate_queue_count": len(self.bank.coordinate_test_queue),
                     "confirmed_rule_count": len(self.bank.confirmed_rules),
                     "unprobed_actions": self.memory.unprobed_action_effect_ids(snapshot, self.config),
@@ -196,19 +218,26 @@ class GameSession:
                     "qwen_total_calls_this_level": self.budget.total_calls_by_level.get(state.level_index, 0),
                 }
                 runtime_log(
-                    "no_executable_candidate",
+                    "no_executable_candidate_using_safe_fallback",
                     level=state.level_index,
                     step=state.step_index,
-                    fallback_enabled=False,
+                    fallback_enabled=True,
                     semantic_queue_count=len(self.bank.semantic_test_queue),
+                    verified_semantic_count=len(self.bank.verified_semantic),
                     coordinate_queue_count=len(self.bank.coordinate_test_queue),
                     confirmed_rule_count=len(self.bank.confirmed_rules),
                     unprobed_actions=self.memory.unprobed_action_effect_ids(snapshot, self.config),
                     missing_action_ids=research["missing_action_ids"],
                 )
+                if fallback is not None:
+                    if self._should_reset_instead_of_flail(state.level_index, fallback):
+                        self._fallback_streak_by_level[state.level_index] = 0
+                        return self._emit_attempt_reset(snapshot, "no_executable_hypothesis_fallback_exhausted")
+                    self._fallback_streak_by_level[state.level_index] += 1
+                    return self._emit(snapshot, fallback)
                 if self._can_reset_failed_attempt(state.level_index):
                     return self._emit_attempt_reset(snapshot, "no_executable_verified_hypothesis")
-                raise RuntimeError("no verifier-authorized action: no executable verified hypothesis remains and deterministic fallback is disabled")
+                raise RuntimeError("no verifier-authorized action: no executable hypothesis remains and safe fallback produced nothing")
             preflight = self.preflight_judge.validate(candidate, snapshot, self.memory, self.config)
             if preflight.valid:
                 break
@@ -268,6 +297,7 @@ class GameSession:
             "terminal_level_limit": dict(self._terminal_level_limit),
             "level_attempt_records": list(self.memory.level_attempt_records),
             "confirmed_rule_count": len(self.bank.confirmed_rules),
+            "verified_semantic_count": len(self.bank.verified_semantic),
             "semantic_queue_count": len(self.bank.semantic_test_queue),
             "coordinate_queue_count": len(self.bank.coordinate_test_queue),
             "fallback_queue_count": len(self.bank.fallback_exploration_queue),
@@ -286,6 +316,8 @@ class GameSession:
             self.memory.reset_game(state.game_id)
             self._last_game_id = state.game_id
         snapshot = self.arga_lite.build(state, self.memory, self.config)
+        self._planning_set = build_planning_set_from_snapshot(snapshot)
+        self._planning_set_snapshot_id = snapshot.snapshot_id
         return state, snapshot
 
     def _with_monotonic_step_index(self, state):
@@ -415,6 +447,7 @@ class GameSession:
             self._action_count_by_level[state.level_index] = 0
             self._terminal_level_limit = {}
             self._reset_qwen_attempt_budget(state.level_index)
+            self._qwen_empty_primary_streak = 0
             self.memory.begin_level_attempt(state.level_index, 0, retry=False, entry_source="level_entry")
             self._last_level_index = state.level_index
             self._last_levels_completed = state.levels_completed
@@ -430,6 +463,7 @@ class GameSession:
     def _begin_retry_attempt(self, level_index: int, step_index: int, reset_source: str) -> None:
         attempt_index = self._attempt_index_by_level.get(level_index, 0) + 1
         self._attempt_index_by_level[level_index] = attempt_index
+        self._fallback_streak_by_level[level_index] = 0
         self._reset_qwen_attempt_budget(level_index)
         self.bank.reset_level(level_index)
         self.memory.begin_level_attempt(level_index, attempt_index, retry=True, entry_source=reset_source)
@@ -442,6 +476,26 @@ class GameSession:
             retained_action_memory=len(self.memory.action_memory_records),
             retained_attempt_failures=len(self.memory.level_attempt_records),
         )
+
+    _MAX_FALLBACK_STREAK_BEFORE_ATTEMPT_RESET = 8
+    _FALLBACK_SOURCES = {"memory_aware_fallback", "exhaustion_revisit"}
+
+    def _should_reset_instead_of_flail(self, level_index: int, fallback: CandidateAction) -> bool:
+        """Dead-attempt detection for the RESET-with-explanation cycle.
+
+        Fires only when the policy has nothing but fallback/liveness actions,
+        Qwen was already spent on this attempt, no recent step produced positive
+        progress (never reset a line that is still advancing), and the flail
+        streak reached the bound. The reset retains verifier/judge feedback in
+        memory, so the next Qwen packet explains why the attempt failed.
+        """
+        if fallback.source not in self._FALLBACK_SOURCES:
+            return False
+        if not self._can_reset_failed_attempt(level_index):
+            return False
+        if self.memory.recent_progress_positive():
+            return False
+        return self._fallback_streak_by_level.get(level_index, 0) + 1 >= self._MAX_FALLBACK_STREAK_BEFORE_ATTEMPT_RESET
 
     def _can_reset_failed_attempt(self, level_index: int) -> bool:
         return (
@@ -503,6 +557,8 @@ class GameSession:
     def _emit(self, snapshot, candidate: CandidateAction) -> dict[str, Any]:
         if self.pending_action is not None:
             raise RuntimeError("attempted to emit while an official transition is pending")
+        if candidate.source not in self._FALLBACK_SOURCES:
+            self._fallback_streak_by_level[snapshot.level_index] = 0
         is_coordinate = candidate.action_id in snapshot.coordinate_action_ids or candidate.x is not None or candidate.y is not None
         is_coordinate_research = is_coordinate and is_coordinate_research_source(candidate.source)
         self.memory.mark_emitted_action(
@@ -540,18 +596,35 @@ class GameSession:
             )
             # Count the real invocation even when the backend times out or returns malformed output.
             record_qwen_call(role, state.level_index, state.step_index, self.budget)
-            proposals = self.qwen.call(role, packet, self.config)
+            # Anti-fixation: when consecutive PRIMARY calls produce only rejected
+            # hypotheses (dominant failure mode observed live: the model rephrases
+            # the same failed trajectory), escalate sampling temperature to break
+            # the attractor. Streak resets on any productive call or level change.
+            call_config = self.config
+            if role is QwenRole.PRIMARY and self._qwen_empty_primary_streak > 0:
+                escalated = min(0.9, float(self.config.qwen_temperature) + 0.2 * self._qwen_empty_primary_streak)
+                call_config = replace(self.config, qwen_temperature=escalated)
+            proposals = self.qwen.call(role, packet, call_config)
+            self._qwen_successful_calls_this_game += 1
             invalid_before = len(self.bank.invalid_rejections)
             semantic_before = len(self.bank.semantic_test_queue)
             coordinate_before = len(self.bank.coordinate_test_queue)
             self.bank.add_qwen_output(role, proposals, snapshot, self.config, packet=packet)
             for item in (
                 self.bank.semantic_test_queue
+                + self.bank.verified_semantic
                 + self.bank.coordinate_test_queue
                 + self.bank.confirmed_rules
             ):
                 self.memory.record_semantic_binding(item.semantic_binding, snapshot)
             new_rejections = self.bank.invalid_rejections[invalid_before:]
+            semantic_added = max(0, len(self.bank.semantic_test_queue) - semantic_before)
+            coordinate_added = max(0, len(self.bank.coordinate_test_queue) - coordinate_before)
+            if role is QwenRole.PRIMARY:
+                if semantic_added + coordinate_added > 0:
+                    self._qwen_empty_primary_streak = 0
+                else:
+                    self._qwen_empty_primary_streak += 1
             runtime_log(
                 "qwen_call",
                 role=role.value,
@@ -563,21 +636,134 @@ class GameSession:
                 schema_version=(proposals or {}).get("schema_version") if isinstance(proposals, dict) else None,
                 hypothesis_count=len((proposals or {}).get("hypotheses") or []) if isinstance(proposals, dict) else 0,
                 coordinate_hypothesis_count=len((proposals or {}).get("candidate_sequence") or []) if isinstance(proposals, dict) else 0,
-                semantic_queue_added=max(0, len(self.bank.semantic_test_queue) - semantic_before),
-                coordinate_queue_added=max(0, len(self.bank.coordinate_test_queue) - coordinate_before),
+                semantic_queue_added=semantic_added,
+                coordinate_queue_added=coordinate_added,
                 rejection_count=len(new_rejections),
                 rejection_reasons=[str(item.get("reason")) for item in new_rejections[-8:] if isinstance(item, dict)],
+                empty_primary_streak=self._qwen_empty_primary_streak,
+                sampling_temperature=float(call_config.qwen_temperature),
             )
-        except QwenBackendError:
-            if self.config.qwen_require_runtime:
+
+            # Offline Contour B: repair trajectories only. Session owns state;
+            # verifier is a pure advisory function. Never promote into confirmed_rules.
+            try:
+                if isinstance(packet, dict):
+                    self._planning_set = build_planning_set_from_packet(packet, snapshot)
+                    self._planning_set_snapshot_id = snapshot.snapshot_id
+                    identity_violations = assert_dual_view_identity(packet, self._planning_set)
+                    if identity_violations:
+                        runtime_log(
+                            "dual_view_identity_violation",
+                            snapshot_id=snapshot.snapshot_id,
+                            violations=identity_violations[:5],
+                        )
+                verifier = TrajectoryVerifier(self.config)
+                new_semantic = list(self.bank.semantic_test_queue[semantic_before:])
+                for hyp in new_semantic:
+                    try:
+                        result = verifier.verify_hypothesis(
+                            hyp,
+                            snapshot,
+                            self.memory,
+                            self.config,
+                            verifier_packet=packet.get("verifier_packet") if isinstance(packet, dict) else None,
+                        )
+                        runtime_log(
+                            "trajectory_verifier_result",
+                            hypothesis_id=getattr(hyp, "hypothesis_id", None),
+                            status=result.status,
+                            reason=result.reason,
+                            confidence=result.confidence,
+                        )
+                        if result.status in ("ACCEPT", "CORRECTED", "PARTIAL") and result.plan is not None:
+                            hyp.trajectory_start_snapshot = snapshot
+                            original_length = len(hyp.test_plan)
+                            original_plan = tuple(hyp.test_plan)
+                            if result.plan.steps:
+                                hyp.test_plan = rebind_plan_to_test_steps(
+                                    list(result.plan.steps),
+                                    snapshot,
+                                    hyp.hypothesis_id,
+                                    semantic_binding=getattr(hyp, "semantic_binding", None),
+                                    original_plan=original_plan,
+                                )
+                                if result.plan.expected_final_state_hash:
+                                    hyp.expected_final_state_hash = result.plan.expected_final_state_hash
+                                elif not hyp.expected_final_state_hash and isinstance(result.plan.goal, dict):
+                                    goal_hash = result.plan.goal.get("expected_final_state_hash")
+                                    if isinstance(goal_hash, str) and goal_hash:
+                                        hyp.expected_final_state_hash = goal_hash
+                                hyp.trajectory_verified = True
+                                try:
+                                    self.bank.semantic_test_queue.remove(hyp)
+                                except ValueError:
+                                    pass
+                                if hyp not in self.bank.verified_semantic:
+                                    self.bank.verified_semantic.append(hyp)
+                                runtime_log(
+                                    "trajectory_plan_applied",
+                                    hypothesis_id=hyp.hypothesis_id,
+                                    original_plan_length=original_length,
+                                    corrected_plan_length=len(hyp.test_plan),
+                                    expected_final_state_hash=hyp.expected_final_state_hash,
+                                    status=result.status,
+                                    reason=result.reason,
+                                    goal_hash_source=(result.details or {}).get("goal_hash_source") if isinstance(result.details, dict) else None,
+                                    prefix_steps=(result.details or {}).get("prefix_steps") if isinstance(result.details, dict) else None,
+                                )
+                            else:
+                                # Empty repaired plan: keep original model steps executable.
+                                runtime_log(
+                                    "trajectory_plan_empty_kept_model",
+                                    hypothesis_id=hyp.hypothesis_id,
+                                    status=result.status,
+                                    reason=result.reason,
+                                )
+                        elif result.status == "PASSTHROUGH":
+                            # Syntax-ok model plan stays on semantic_test_queue for empiric execution.
+                            runtime_log(
+                                "trajectory_passthrough",
+                                hypothesis_id=getattr(hyp, "hypothesis_id", None),
+                                reason=result.reason,
+                            )
+                        elif result.status == "REJECT":
+                            # Soft reject: mark invalid so policy skips it, but keep in rejected for feedback.
+                            hyp.validity = Validity.INVALID
+                            if hyp not in self.bank.rejected:
+                                self.bank.rejected.append(hyp)
+                            self.bank.invalid_rejections.append({
+                                "reason": "trajectory_verifier_reject",
+                                "hypothesis_id": hyp.hypothesis_id,
+                                "verifier_reason": result.reason,
+                                "details": getattr(result, "details", None),
+                            })
+                    except Exception as exc:
+                        runtime_log("trajectory_verifier_error", hypothesis_id=getattr(hyp, "hypothesis_id", None), exc=str(exc)[:400])
+            except Exception as exc:
+                runtime_log("trajectory_verifier_init_failed", exc_type=type(exc).__name__, exc=str(exc)[:400])
+
+        except QwenBackendError as exc:
+            # Fail fast only while the backend has never produced a successful
+            # call this game (misconfiguration must stay loud). Once the
+            # backend is proven, a single timeout/parse failure degrades to a
+            # skipped call instead of killing the whole game worker.
+            if self.config.qwen_require_runtime and self._qwen_successful_calls_this_game <= 0:
                 raise
-            runtime_log("qwen_backend_soft_failure", role=role.value, level=state.level_index, attempt_index=self._attempt_index_by_level.get(state.level_index, 0))
+            runtime_log(
+                "qwen_backend_soft_failure",
+                role=role.value,
+                level=state.level_index,
+                attempt_index=self._attempt_index_by_level.get(state.level_index, 0),
+                exc_type=type(exc).__name__,
+                exc=str(exc)[:300],
+                qwen_successful_calls_this_game=self._qwen_successful_calls_this_game,
+            )
         except QwenPacketNotReady as exc:
             runtime_log("qwen_packet_not_ready", role=role.value, reason=str(exc)[:500])
         except Exception as exc:
-            if self.config.qwen_require_runtime:
+            if self.config.qwen_require_runtime and self._qwen_successful_calls_this_game <= 0:
                 raise
-            runtime_log("qwen_soft_failure", role=role.value, level=state.level_index, attempt_index=self._attempt_index_by_level.get(state.level_index, 0), exc_type=type(exc).__name__, exc=str(exc)[:500])
+            runtime_log("qwen_soft_failure", role=role.value, level=state.level_index, attempt_index=self._attempt_index_by_level.get(state.level_index, 0), exc_type=type(exc).__name__, exc=str(exc)[:500], qwen_successful_calls_this_game=self._qwen_successful_calls_this_game)
 
     def _handle_game_over(self, snapshot) -> dict[str, Any]:
         if not self.config.reset_on_game_over:
@@ -599,6 +785,8 @@ class GameSession:
         self._last_level_index = None
         self._last_levels_completed = 0
         self._action_count_this_game = 0
+        self._qwen_successful_calls_this_game = 0
+        self._qwen_empty_primary_streak = 0
         self._game_over_resets_this_game = 0
         self._game_over_resets_by_level = defaultdict(int)
         self._attempt_index_by_level = defaultdict(int)
@@ -611,3 +799,4 @@ class GameSession:
         self._synthetic_step_index = -1
         self._last_action_selection = {}
         self._alternative_hypothesis_resets_this_game = 0
+        self._fallback_streak_by_level = defaultdict(int)

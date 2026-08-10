@@ -5,10 +5,11 @@ from typing import Any
 
 from .component_graph import build_component_graph
 from .config import V8Config
-from .frame_media import current_frame_png
+from .frame_media import annotated_frame_png, current_frame_png
 from .memory import is_action_research_source, is_coordinate_research_source
 from .observe import stable_hash
 from .types import ARGALiteSnapshot, MemoryEvent, QwenRole, Relevance
+from .verifier_packet import build_verifier_packet
 
 
 class QwenPacketNotReady(RuntimeError):
@@ -39,7 +40,7 @@ class QwenPacketBuilder:
         all_object_ids = {item["id"] for item in raw_objects}
         all_relations = _relations(snapshot, all_object_ids, config)
         all_relation_ids = {item["id"] for item in all_relations}
-        all_candidates = _coordinate_candidates(snapshot, all_object_ids, all_relation_ids, config)
+        all_candidates = _coordinate_candidates(snapshot, all_object_ids, all_relation_ids, config, memory=memory)
         all_geometry_groups = _annotate_object_geometry(raw_objects)
         focus_ids = _layered_focus_object_ids(raw_objects, all_candidates, memory, snapshot, config)
         coordinate_execution_allowed = bool(set(allowed_action_ids) & set(snapshot.coordinate_action_ids))
@@ -81,20 +82,58 @@ class QwenPacketBuilder:
         frame_png = current_frame_png(snapshot.full_grid_hex_rows, cell_scale=config.frame_png_cell_scale)
         frame_png["transport"] = "out_of_band_multimodal_attachment"
         frame_png["available_to_configured_backend"] = bool(config.qwen_multimodal_enabled)
+        annotation_specs = [
+            {
+                "label": str(item.get("id")),
+                "bbox_xyxy": list(item.get("bbox_xyxy") or []),
+            }
+            for item in objects
+            if isinstance(item, dict) and item.get("id") is not None and item.get("bbox_xyxy")
+        ]
+        annotated_png = annotated_frame_png(
+            snapshot.full_grid_hex_rows,
+            annotation_specs,
+            cell_scale=config.frame_png_cell_scale,
+        )
+        annotated_png["transport"] = "out_of_band_multimodal_attachment"
+        annotated_png["available_to_configured_backend"] = bool(config.qwen_multimodal_enabled)
         semantic_feedback = memory.semantic_feedback_for_qwen(snapshot, config)
         _filter_semantic_feedback_references(semantic_feedback, focus_ids, focus_relation_ids)
         semantic_feedback = _alias_recent_evidence(semantic_feedback, aliases)
         object_rebindings = memory.semantic_object_rebindings_for_snapshot(snapshot)
+        verifier_packet = build_verifier_packet(
+            snapshot=snapshot,
+            memory=memory,
+            objects=objects,
+            relations=relations,
+            candidates=candidates,
+            aliases=aliases,
+            component_graph=component_graph,
+            allowed_action_ids=list(allowed_action_ids),
+            role=role.value if hasattr(role, "value") else str(role),
+        )
         packet = {
             "schema_version": "v8.8.layered_observation",
+            "dual_view": {
+                "qwen_visual": "two attached images of the same frame: IMAGE_1 current_frame_png (raw grid), IMAGE_2 annotated_frame_png (grid + planning-object bboxes/labels)",
+                "verifier_hex": "verifier_packet.full_grid_hex_rows + planning_objects",
+                "planning_ids": "tracked objects only (object_layer.objects / verifier_packet.planning_objects)",
+                "geometry_evidence": "component_graph only; never use component IDs as trajectory targets",
+            },
             "state": _state(snapshot, memory, role),
             "current_frame_png": frame_png,
+            "annotated_frame_png": annotated_png,
             "object_layer": {
                 "coordinate_system": "x=column,y=row; origin=top_left",
                 "segmentation_contract": (
-                    "Objects are tracked connected regions. Components are same-color 4-connected regions; "
-                    "neither layer assigns gameplay roles or goals."
+                    "PLANNING IDs: objects[] are tracked connected regions and the only legal "
+                    "object references in trajectories. GEOMETRY EVIDENCE: component_graph is a "
+                    "same-color 4-connected partition of every cell; components may link to objects "
+                    "via object_refs but component IDs are observation-only and must not appear in "
+                    "actions/objectives. Neither layer assigns gameplay goals."
                 ),
+                "planning_object_role": "TRACKED_CONNECTED_REGION",
+                "component_graph_role": "GEOMETRY_EVIDENCE_ONLY",
                 "objects": objects,
                 "exact_geometry_groups": geometry_groups,
                 "relations": relations,
@@ -123,6 +162,7 @@ class QwenPacketBuilder:
                 "attempts": _attempt_memory(memory, bank, snapshot, aliases, config),
                 "semantic_feedback": semantic_feedback,
             },
+            "verifier_packet": verifier_packet,
             "execution_constraints": {
                 "max_plan_steps": int(config.max_qwen_trajectory_steps),
                 "allowed_action_ids": sorted(allowed_action_ids),
@@ -268,6 +308,8 @@ def _layered_component_graph_for_packet(
             "colors": group.get("colors") or [],
         })
     return {
+        "role": "GEOMETRY_EVIDENCE_ONLY",
+        "planning_id_policy": "component_ids_are_not_legal_trajectory_targets",
         "connectivity": 4,
         "covers_all_frame_cells": True,
         "shape_hash_semantics": "translation_invariant_color_independent_exact_occupancy",
@@ -503,6 +545,7 @@ def _action_diffs(
                 else {}
             ) or {},
         }
+        derived_effects, effect_digest = _derive_action_effect_summary(object_changes, pixel_diff)
         item = {
             "action_id": str(record.get("action_id")),
             "level_index": record.get("level_index_before", record.get("level_index")),
@@ -523,6 +566,8 @@ def _action_diffs(
             "pixel_diff": pixel_diff,
             "synchronous_local_visual_evidence": _local_visual_transition_evidence(record),
             "object_changes": object_changes,
+            "derived_object_effects": derived_effects,
+            "effect_digest": effect_digest,
             "level_result": {
                 "levels_completed_delta": record.get("levels_completed_delta"),
                 "level_index_delta": record.get("level_index_delta"),
@@ -532,6 +577,157 @@ def _action_diffs(
         }
         out.append(_drop_empty(item))
     return out
+
+
+def _derive_action_effect_summary(
+    object_changes: list[dict[str, Any]],
+    pixel_diff: dict[str, Any],
+    *,
+    max_effects: int = 8,
+) -> tuple[list[dict[str, Any]], str]:
+    """Compress a raw probe diff into an explicit per-object effect list and a
+    one-line digest.
+
+    Motivation (owner directive 2026-08): the model must not be forced to
+    subtract centroids buried in nested JSON to learn that "ACTION4 moves o3
+    +3x and o4 -3x". Probe knowledge has to arrive pre-digested. Cells that
+    changed outside every tracked object are reported separately so the model
+    can discount UI/counter noise instead of hallucinating playfield meaning
+    onto it.
+    """
+    effects: list[dict[str, Any]] = []
+    object_bboxes: list[tuple[int, int, int, int]] = []
+    for change in object_changes:
+        if not isinstance(change, dict):
+            continue
+        entry: dict[str, Any] = {}
+        object_id = change.get("object_id")
+        if object_id:
+            entry["object_id"] = object_id
+        lifecycle = change.get("lifecycle")
+        if lifecycle and lifecycle != "persisted":
+            entry["lifecycle"] = lifecycle
+        before = change.get("before") if isinstance(change.get("before"), dict) else {}
+        after = change.get("after") if isinstance(change.get("after"), dict) else {}
+        for state in (before, after):
+            bbox = state.get("bbox_xyxy")
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                try:
+                    object_bboxes.append(tuple(int(v) for v in bbox))
+                except (TypeError, ValueError):
+                    pass
+        bb_before = before.get("bbox_xyxy")
+        bb_after = after.get("bbox_xyxy")
+        bbox_moved = (
+            isinstance(bb_before, (list, tuple)) and isinstance(bb_after, (list, tuple))
+            and len(bb_before) == 4 and len(bb_after) == 4
+            and list(bb_before) != list(bb_after)
+        )
+        bc = before.get("centroid_xy")
+        ac = after.get("centroid_xy")
+        # Movement is reported only when the integer bbox actually shifted;
+        # sub-cell centroid jitter from area/palette changes is not motion.
+        # A bbox change with zero net translation is a reshape, not a move.
+        if bbox_moved:
+            dx = dy = 0.0
+            if isinstance(bc, (list, tuple)) and isinstance(ac, (list, tuple)) and len(bc) == 2 and len(ac) == 2:
+                try:
+                    dx = float(ac[0]) - float(bc[0])
+                    dy = float(ac[1]) - float(bc[1])
+                except (TypeError, ValueError):
+                    dx = dy = 0.0
+            else:
+                dx = float(int(bb_after[0]) - int(bb_before[0]))
+                dy = float(int(bb_after[1]) - int(bb_before[1]))
+            rdx, rdy = int(round(dx)), int(round(dy))
+            if rdx or rdy:
+                entry["moved_dx_dy"] = [rdx, rdy]
+            else:
+                entry["bbox_or_shape_changed"] = True
+        ba = before.get("area")
+        aa = after.get("area")
+        if isinstance(ba, (int, float)) and isinstance(aa, (int, float)) and aa != ba:
+            entry["area_delta"] = int(aa) - int(ba)
+        bp = before.get("palette_ids")
+        ap = after.get("palette_ids")
+        if bp is not None and ap is not None and bp != ap:
+            entry["palette_changed"] = True
+        if len(entry) > 1:
+            effects.append(entry)
+    effects = effects[:max_effects]
+    changed_count = int(pixel_diff.get("changed_cell_count") or 0)
+    # Exact unattribution: count changed cells outside every tracked object's
+    # before/after bbox union. Enumerate positions only when the encoding is
+    # small enough; otherwise skip the note instead of guessing.
+    unattributed = 0
+    enumerated = 0
+    max_enumerate = 8192
+
+    def _outside(x: int, y: int) -> bool:
+        return not any(x0 <= x <= x1 and y0 <= y <= y1 for (x0, y0, x1, y1) in object_bboxes)
+
+    position_data_known = False
+    if changed_count and object_bboxes and changed_count <= max_enumerate:
+        sparse = pixel_diff.get("changed_cells_xy") or []
+        runs = pixel_diff.get("changed_row_runs") or []
+        if sparse:
+            position_data_known = True
+            for cell in sparse:
+                xy = cell.get("xy") if isinstance(cell, dict) else None
+                if isinstance(xy, (list, tuple)) and len(xy) == 2:
+                    enumerated += 1
+                    if _outside(int(xy[0]), int(xy[1])):
+                        unattributed += 1
+        elif runs and pixel_diff.get("position_data_complete"):
+            position_data_known = True
+            for run in runs:
+                if not isinstance(run, dict):
+                    continue
+                try:
+                    y = int(run.get("y"))
+                    x0, x1 = (int(v) for v in run.get("x_range_inclusive"))
+                except (TypeError, ValueError):
+                    continue
+                for x in range(x0, x1 + 1):
+                    enumerated += 1
+                    if enumerated > max_enumerate:
+                        position_data_known = False
+                        unattributed = 0
+                        break
+                    if _outside(x, y):
+                        unattributed += 1
+                if not position_data_known:
+                    break
+    if not position_data_known:
+        unattributed = 0
+    parts: list[str] = []
+    for effect in effects:
+        desc: list[str] = []
+        if "moved_dx_dy" in effect:
+            desc.append(f"moved dx={effect['moved_dx_dy'][0]} dy={effect['moved_dx_dy'][1]}")
+        elif effect.get("bbox_or_shape_changed"):
+            desc.append("bbox/shape changed (no net translation)")
+        if "area_delta" in effect:
+            desc.append(f"area {effect['area_delta']:+d}")
+        if effect.get("lifecycle") == "appeared":
+            desc.append("appeared")
+        elif effect.get("lifecycle") == "disappeared":
+            desc.append("disappeared")
+        if effect.get("palette_changed"):
+            desc.append("recolored")
+        if desc:
+            parts.append(f"{effect.get('object_id')}: {', '.join(desc)}")
+    if unattributed:
+        parts.append(f"{unattributed} cell(s) changed outside tracked objects (likely UI/counter/background)")
+    if not parts:
+        digest = (
+            "no visible grid change"
+            if changed_count == 0
+            else f"{changed_count} cell(s) changed without tracked-object attribution"
+        )
+    else:
+        digest = "; ".join(parts)
+    return effects, digest
 
 
 def _group_action_diff_records(
@@ -1033,10 +1229,8 @@ def _filter_semantic_feedback_references(
 def qwen_planning_ready(snapshot: ARGALiteSnapshot, memory: "GameMemory", role: QwenRole = QwenRole.PRIMARY) -> bool:
     if role is QwenRole.COORDINATE:
         return bool(snapshot.coordinate_action_ids and snapshot.coordinate_targets)
-    required_actions = memory.required_action_research_ids(snapshot)
-    if not required_actions:
-        return False
-    return not memory.action_research_status(snapshot)["missing_action_ids"]
+    status = memory.action_research_status(snapshot)
+    return not status["missing_action_ids"]   # True, если все действия исследованы
 
 
 def _state(snapshot: ARGALiteSnapshot, memory: "GameMemory", role: QwenRole) -> dict[str, Any]:
@@ -2451,7 +2645,7 @@ def _color_component_entities(snapshot: ARGALiteSnapshot, *, limit: int) -> list
     return entities[:limit]
 
 
-def _coordinate_candidates(snapshot: ARGALiteSnapshot, allowed_object_ids: set[str], allowed_relation_ids: set[str], config: V8Config) -> list[dict[str, Any]]:
+def _coordinate_candidates(snapshot: ARGALiteSnapshot, allowed_object_ids: set[str], allowed_relation_ids: set[str], config: V8Config, memory: "GameMemory | None" = None) -> list[dict[str, Any]]:
     out = []
     for candidate in snapshot.coordinate_targets:
         if len(out) >= config.max_coordinate_candidates_in_packet:
@@ -2474,7 +2668,46 @@ def _coordinate_candidates(snapshot: ARGALiteSnapshot, allowed_object_ids: set[s
             "target_signature": candidate.target_signature,
             "raw_xy_hidden_from_model": True,
         })
+    if memory is not None:
+        _annotate_candidate_outcomes(out, memory)
     return out
+
+
+def _annotate_candidate_outcomes(candidates: list[dict[str, Any]], memory: "GameMemory") -> None:
+    """Attach empirical click history to each candidate (model-facing).
+
+    Preflight suppression already blocks exact no-effect repeats at execution
+    time; without the same evidence in the packet the model keeps proposing
+    dead coordinates and burns the per-level call budget on rejectable plans.
+    """
+    records = list(getattr(memory, "coordinate_effects", ()) or ())
+    if not records:
+        return
+    for item in candidates:
+        cid = item.get("id")
+        loc = item.get("location_xy") or [None, None]
+        matched = [
+            rec for rec in records
+            if (rec.candidate_target_id is not None and rec.candidate_target_id == cid)
+            or (rec.candidate_target_id is None and [rec.x, rec.y] == list(loc))
+        ]
+        if not matched:
+            continue
+        no_effect = sum(1 for rec in matched if rec.relevance.name == "IRRELEVANT")
+        positive = sum(1 for rec in matched if rec.progress.name == "POSITIVE")
+        last = matched[-1]
+        advice = None
+        if no_effect and not positive and last.progress.name != "POSITIVE":
+            advice = "avoid_exact_repeat_no_effect"
+        elif positive:
+            advice = "repeat_showed_positive_effect"
+        item["observed_outcome"] = {
+            "attempts": len(matched),
+            "no_effect_count": no_effect,
+            "positive_count": positive,
+            "last_effect": str(last.observed_effect)[:160],
+            "advice": advice,
+        }
 
 
 def _grid_value_at(snapshot: ARGALiteSnapshot, x: int, y: int) -> str | None:

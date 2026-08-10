@@ -62,9 +62,17 @@ class PreflightJudge:
             memory.action_attempt_count(candidate_action.suppression_signature, snapshot.semantic_state_signature) >= config.max_same_state_action_repeats
             and not candidate_action.allow_exhaustion_revisit
         ):
-            # Confirmed positive actions may be reused; failed/irrelevant exact repeats may not.
+            # Suppress exact same-state repeats only when the last identical action
+            # was inconclusive or worse (no visible effect / negative / failed).
+            # Repeating an action that previously produced a visible effect is
+            # confirmed-effect exploitation, not epistemic waste: hypothesis
+            # trajectories legitimately re-apply confirmed actions, and each
+            # visible effect changes the state signature, so this cannot loop.
             last = next((ev for ev in reversed(memory.events) if ev.action and ev.action.get("id") == candidate_action.action_id), None)
-            if last is not None and last.progress is not Progress.POSITIVE:
+            if last is not None and not (
+                last.progress is Progress.POSITIVE
+                or last.attribution is Attribution.ACTION_LINKED
+            ):
                 return PreflightResult(False, Validity.INVALID, "same_candidate_repeat_suppressed")
         return PreflightResult(True, Validity.VALID, "ok")
 

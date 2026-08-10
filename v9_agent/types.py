@@ -477,6 +477,9 @@ class HypothesisItem:
     trajectory_start_snapshot: ARGALiteSnapshot | None = None
     trajectory_judgments: list[Judgment] = field(default_factory=list)
     executed_action_ids: list[str] = field(default_factory=list)
+    expected_final_state_hash: str | None = None
+    goal_spec: dict[str, object] | None = None
+    trajectory_verified: bool = False
 
     def has_next_step(self) -> bool:
         return self.cursor < len(self.test_plan)

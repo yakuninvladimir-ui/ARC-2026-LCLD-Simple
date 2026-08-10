@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import replace
 from typing import Any
 
 from .config import V8Config
 from .observe import stable_hash
-from .qwen_packet import translate_model_ids_to_internal
+from .qwen_packet import build_model_aliases, translate_model_ids_to_internal
 from .reverse_semantics import bind_semantic_objective, evaluate_trajectory
 from .types import (
     ARGALiteSnapshot,
@@ -18,6 +19,7 @@ from .types import (
     Progress,
     QwenRole,
     Relevance,
+    SemanticJudgment,
     SemanticObjective,
     TestStep,
     TrajectoryEvaluation,
@@ -29,8 +31,24 @@ from .verification import VerificationBinder
 
 
 class HypothesisBank:
+    # Hard cap on confirmed-effect continuations per level. Bounds directed
+    # exploitation so a confirmed-but-non-terminal mechanic cannot starve the
+    # remaining hypothesis queues; game action/wall-clock budgets bound it too.
+    _MAX_PROGRESS_CONTINUATIONS_PER_LEVEL = 48
+
+    # Judgment reason codes that prove the action visibly changed the world.
+    _VISIBLE_EFFECT_REASONS = frozenset({
+        "typed_action_effect_observed",
+        "target_object_displaced",
+        "target_local_change_observed",
+        "score_or_terminal_progress",
+        "action_surface_changed",
+        "relation_error_decreased",
+    })
+
     def __init__(self) -> None:
         self.confirmed_rules: list[HypothesisItem] = []
+        self.verified_semantic: list[HypothesisItem] = []
         self.semantic_test_queue: list[HypothesisItem] = []
         self.coordinate_test_queue: list[HypothesisItem] = []
         self.fallback_exploration_queue: list[HypothesisItem] = []
@@ -40,10 +58,12 @@ class HypothesisBank:
         self._current_step = 0
         self._active_hypothesis_id: str | None = None
         self._pending_alternative_reset: dict[str, Any] | None = None
+        self._continuation_count_by_level: dict[int, int] = {}
 
     def reset_level(self, level_index: int) -> None:
         # Concrete target IDs are level-local. Mechanic knowledge lives in GameMemory.
         self.confirmed_rules.clear()
+        self.verified_semantic.clear()
         self.semantic_test_queue.clear()
         self.coordinate_test_queue.clear()
         self.fallback_exploration_queue.clear()
@@ -51,6 +71,7 @@ class HypothesisBank:
         self.invalid_rejections.clear()
         self._active_hypothesis_id = None
         self._pending_alternative_reset = None
+        self._continuation_count_by_level.clear()
 
     def pending_alternative_reset(self) -> dict[str, Any] | None:
         if self._pending_alternative_reset is None:
@@ -68,7 +89,7 @@ class HypothesisBank:
             return []
         batch_id = str(request.get("proposal_batch_id") or "")
         rebound_bindings = []
-        for item in self.semantic_test_queue:
+        for item in self.semantic_test_queue + self.verified_semantic:
             if item.proposal_batch_id != batch_id or not item.has_next_step():
                 continue
             binding = item.semantic_binding
@@ -125,7 +146,12 @@ class HypothesisBank:
     def attempt_feedback(self, limit: int = 12) -> dict[str, Any]:
         hypotheses = []
         seen: set[str] = set()
-        for item in self.rejected + self.semantic_test_queue + self.coordinate_test_queue:
+        for item in (
+            self.rejected
+            + self.verified_semantic
+            + self.semantic_test_queue
+            + self.coordinate_test_queue
+        ):
             if item.hypothesis_id in seen:
                 continue
             seen.add(item.hypothesis_id)
@@ -140,6 +166,13 @@ class HypothesisBank:
                 "validity": item.validity.value,
                 "relevance": item.relevance.value,
                 "progress": item.progress.value,
+                "trajectory_verified": bool(getattr(item, "trajectory_verified", False)),
+                "queue": (
+                    "rejected" if item in self.rejected
+                    else "verified_semantic" if item in self.verified_semantic
+                    else "semantic_test_queue" if item in self.semantic_test_queue
+                    else "coordinate_test_queue"
+                ),
             })
         return {
             "hypotheses": hypotheses[-limit:],
@@ -152,7 +185,16 @@ class HypothesisBank:
 
     def has_valid_action_candidates(self, snapshot: ARGALiteSnapshot | None = None) -> bool:
         if snapshot is None:
-            return any(self._usable(h, self._current_step) for h in self.confirmed_rules + self.coordinate_test_queue + self.semantic_test_queue + self.fallback_exploration_queue)
+            return any(
+                self._usable(h, self._current_step)
+                for h in (
+                    self.confirmed_rules
+                    + self.verified_semantic
+                    + self.coordinate_test_queue
+                    + self.semantic_test_queue
+                    + self.fallback_exploration_queue
+                )
+            )
         return self.has_executable_candidate(snapshot)
 
     def has_executable_candidate(self, snapshot: ARGALiteSnapshot) -> bool:
@@ -261,7 +303,12 @@ class HypothesisBank:
             if bad or not plan:
                 continue
             claim = _semantic_claim(raw)
+            # extract optional goal spec/expected final state hash from model output
+            model_goal = raw.get("goal_spec") if isinstance(raw.get("goal_spec"), dict) else {}
+            goal_hash = _none_or_str(model_goal.get("expected_final_state_hash") or raw.get("expected_final_state_hash") or raw.get("goal_signature"))
             hid = stable_hash((role.value, snapshot.level_index, snapshot.step_index, idx, raw.get("hypothesis_id"), claim, [(s.kind, s.action_id, s.target_object_id, s.target_relation_id, s.coordinate_candidate_id, s.expected_observation, s.contract_kind) for s in plan]), "hyp_")
+            # Legacy schema branch: only fields computed above are safe.
+            # Do not reuse names from _add_v87_semantic_trajectories scope.
             item = HypothesisItem(
                 hypothesis_id=hid,
                 source=f"{role.value}_qwen",
@@ -275,9 +322,14 @@ class HypothesisBank:
                 priority=_float(raw.get("priority"), 0.0),
                 confidence=_float(raw.get("confidence"), 0.0),
                 expiry_step=(snapshot.step_index + int(raw.get("expiry_steps") or 0)) if raw.get("expiry_steps") else None,
-                evidence_refs=(),
-                suppression_signature=stable_hash((raw.get("claim"), [(p.action_id, p.target_object_id, p.target_relation_id) for p in plan]), "sup_"),
+                evidence_refs=tuple(targets_rel),
+                suppression_signature=stable_hash(
+                    (claim, [(s.action_id, s.coordinate_candidate_id) for s in plan], targets_obj, targets_rel),
+                    "sup_",
+                ),
                 created_state_signature=snapshot.semantic_state_signature,
+                expected_final_state_hash=goal_hash,
+                goal_spec=model_goal if model_goal else None,
             )
             self.semantic_test_queue.append(item)
 
@@ -343,10 +395,18 @@ class HypothesisBank:
                 for run in (raw.get("action_runs") or [])
                 if isinstance(run, dict) and _none_or_str(run.get("action_id")) in coordinate_action_ids
             ]
-            if len(coordinate_candidates_in_trajectory) != len(set(coordinate_candidates_in_trajectory)):
+            max_target_repeats = max(1, int(getattr(config, "max_coordinate_target_repeats_in_trajectory", 6)))
+            candidate_repeat_counts = Counter(coordinate_candidates_in_trajectory)
+            over_repeated_candidate = next(
+                (candidate_id for candidate_id, count in candidate_repeat_counts.items() if count > max_target_repeats),
+                None,
+            )
+            if over_repeated_candidate is not None:
                 self.invalid_rejections.append({
-                    "reason": "coordinate_candidate_repeated_in_trajectory",
-                    "coordinate_candidate_ids": coordinate_candidates_in_trajectory,
+                    "reason": "coordinate_candidate_repeat_exceeds_cap",
+                    "coordinate_candidate_id": over_repeated_candidate,
+                    "count": candidate_repeat_counts[over_repeated_candidate],
+                    "cap": max_target_repeats,
                     "raw": raw,
                 })
                 continue
@@ -356,11 +416,17 @@ class HypothesisBank:
                 for candidate_id in coordinate_candidates_in_trajectory
                 if candidate_id in coordinate_targets_by_id
             ]
-            if len(coordinate_locations_in_trajectory) != len(set(coordinate_locations_in_trajectory)):
+            location_repeat_counts = Counter(coordinate_locations_in_trajectory)
+            over_repeated_location = next(
+                (location for location, count in location_repeat_counts.items() if count > max_target_repeats),
+                None,
+            )
+            if over_repeated_location is not None:
                 self.invalid_rejections.append({
-                    "reason": "coordinate_location_repeated_in_trajectory",
-                    "coordinate_candidate_ids": coordinate_candidates_in_trajectory,
-                    "coordinate_locations_xy": coordinate_locations_in_trajectory,
+                    "reason": "coordinate_location_repeat_exceeds_cap",
+                    "coordinate_location_xy": list(over_repeated_location),
+                    "count": location_repeat_counts[over_repeated_location],
+                    "cap": max_target_repeats,
                     "raw": raw,
                 })
                 continue
@@ -396,6 +462,26 @@ class HypothesisBank:
                 self.invalid_rejections.append({"reason": "first_action_not_available_now", "action_id": actions[0], "raw": raw})
                 continue
             if action_run_steps:
+                # Repair pass: small VL models frequently emit an ACTION6 run with
+                # the coordinate_candidate_id omitted or hallucinated. Bind it to
+                # the whitelisted candidate of a hypothesis-referenced object
+                # instead of killing the whole hypothesis; downstream trajectory
+                # verification remains the authority on the repaired binding.
+                referenced = set(all_objects)
+                repaired_runs: list[tuple[str, str | None]] = []
+                repair_used = False
+                for action_id, candidate_id in action_run_steps:
+                    if action_id in coordinate_action_ids and candidate_id not in valid_coordinate_candidates:
+                        inferred = _infer_coordinate_candidate_id(snapshot, referenced)
+                        if inferred is None:
+                            repaired_runs.append((action_id, candidate_id))
+                            continue
+                        candidate_id = inferred
+                        repair_used = True
+                    repaired_runs.append((action_id, candidate_id))
+                if repair_used:
+                    action_run_steps = repaired_runs
+                    _write_repaired_candidate_ids(raw, repaired_runs, coordinate_action_ids)
                 bad_coordinate_binding = next((
                     (action_id, candidate_id)
                     for action_id, candidate_id in action_run_steps
@@ -511,9 +597,24 @@ class HypothesisBank:
                 continue
 
             plan = []
+            alias_to_internal: dict[str, str] | None = None
             for action_index, action_id in enumerate(actions[: config.max_qwen_trajectory_steps]):
                 contract_kind = _v87_contract_kind(model_raw, action_id, packet)
                 target_ids = sources or all_objects
+                if (
+                    not target_ids
+                    and contract_kind in {"OBJECT_DISPLACEMENT", "LOCAL_TARGET_CHANGE"}
+                    and isinstance(packet, dict)
+                ):
+                    # The probe diffs know *which* planning objects changed under
+                    # this action. Bind the contract to them (model alias ->
+                    # internal tracked id) so the empiric judge measures a named
+                    # displacement instead of a generic typed effect. This keeps
+                    # the object identity identical across the Qwen and verifier
+                    # channels even when the model named no source objects.
+                    if alias_to_internal is None:
+                        alias_to_internal = dict(build_model_aliases(snapshot, config).get("object_aliases", {}))
+                    target_ids = _v87_changed_object_internal_ids(action_id, packet, alias_to_internal, valid_objects)
                 coordinate_candidate_id = action_run_steps[action_index][1] if action_run_steps else None
                 plan.append(TestStep(
                     kind="verified_effect_trajectory_step",
@@ -549,6 +650,8 @@ class HypothesisBank:
                 proposal_batch_id=proposal_batch_id,
                 semantic_objective=semantic_objective,
                 semantic_binding=semantic_binding,
+                expected_final_state_hash=_none_or_str((raw.get("goal_spec") if isinstance(raw.get("goal_spec"), dict) else {}).get("expected_final_state_hash") or raw.get("expected_final_state_hash") or raw.get("goal_signature")),
+                goal_spec=raw.get("goal_spec") if isinstance(raw.get("goal_spec"), dict) else None,
             ))
             added += 1
         if added <= 0:
@@ -1034,12 +1137,24 @@ class HypothesisBank:
         queues: list[list[HypothesisItem]]
         if queue_name == "confirmed":
             queues = [self.confirmed_rules]
+        elif queue_name == "verified_semantic":
+            queues = [self.verified_semantic]
         elif queue_name == "coordinate":
             queues = [self.coordinate_test_queue]
         elif queue_name == "semantic":
             queues = [self.semantic_test_queue]
         else:
-            queues = [self.confirmed_rules, self.coordinate_test_queue, self.semantic_test_queue, self.fallback_exploration_queue]
+            # Priority: empiric confirmed > semantic (offline-repaired boost first,
+            # then raw Qwen) > coordinate research > exploration fallback.
+            # verified_semantic is a boost *within* the semantic tier, not a gate
+            # that starves coordinate probing of memory for Contour B.
+            queues = [
+                self.confirmed_rules,
+                self.verified_semantic,
+                self.semantic_test_queue,
+                self.coordinate_test_queue,
+                self.fallback_exploration_queue,
+            ]
         active = self._find(self._active_hypothesis_id)
         if active is not None and self._usable(active, snapshot.step_index):
             if not any(active in queue for queue in queues):
@@ -1137,6 +1252,11 @@ class HypothesisBank:
                 item.trajectory_judgments,
                 item.executed_action_ids,
             )
+            # evaluate_trajectory inherits the binding's hypothesis id, which is
+            # the *original* proposer; the executing item (e.g. a confirmed
+            # continuation) must own its evaluation for per-hypothesis evidence.
+            if evaluation.hypothesis_id != item.hypothesis_id:
+                evaluation = replace(evaluation, hypothesis_id=item.hypothesis_id)
             item.progress = evaluation.goal_progress
             if evaluation.reason_code == "trajectory_completed_level":
                 item.truth = TriTruth.TRUE
@@ -1177,8 +1297,19 @@ class HypothesisBank:
             self._active_hypothesis_id = None
         self._purge_consumed_and_invalid(self._current_step)
         self._sort()
+        continued = False
         if (
             trajectory_finished
+            and evaluation is not None
+            and after_snapshot is not None
+            and not judgment.terminal_delta
+            and evaluation.reason_code != "trajectory_completed_level"
+            and item.test_plan
+        ):
+            continued = self._enqueue_progress_continuation(item, evaluation, after_snapshot)
+        if (
+            not continued
+            and trajectory_finished
             and evaluation is not None
             and item.proposal_batch_id
             and not judgment.terminal_delta
@@ -1187,7 +1318,7 @@ class HypothesisBank:
         ):
             alternatives = [
                 candidate
-                for candidate in self.semantic_test_queue
+                for candidate in (self.semantic_test_queue + self.verified_semantic)
                 if candidate.hypothesis_id != item.hypothesis_id
                 and candidate.proposal_batch_id == item.proposal_batch_id
                 and self._usable(candidate, after_snapshot.step_index)
@@ -1201,6 +1332,71 @@ class HypothesisBank:
                 }
         return evaluation
 
+    def _enqueue_progress_continuation(
+        self,
+        item: HypothesisItem,
+        evaluation: TrajectoryEvaluation,
+        after_snapshot: ARGALiteSnapshot,
+    ) -> bool:
+        """Chain an empirically confirmed trajectory into a confirmed continuation.
+
+        Converts a confirmed effect into directed multi-step pursuit of the same
+        objective without spending another Qwen call. Fires when the finished
+        trajectory showed POSITIVE goal progress, or when its mechanic was
+        confirmed (MATCH) with at least one visibly effective step. Self-limiting:
+        the first non-confirming empiric judgment ends the lineage, steps that
+        left the action surface trim the plan, and the per-level cap bounds
+        exploitation. Continuations never trigger alternative-entry RESETs
+        (empty proposal_batch_id), so confirmed progress is not destroyed to
+        retry untried siblings.
+        """
+        positive = evaluation.goal_progress is Progress.POSITIVE
+        mechanic_confirmed = (
+            evaluation.mechanic_result is MechanicResult.MATCH
+            and evaluation.semantic_judgment not in (SemanticJudgment.IRRELEVANT, SemanticJudgment.FORBIDDEN)
+            and any(j.reason_code in self._VISIBLE_EFFECT_REASONS for j in item.trajectory_judgments)
+        )
+        if not (positive or mechanic_confirmed):
+            return False
+        level = int(getattr(after_snapshot, "level_index", 0) or 0)
+        count = self._continuation_count_by_level.get(level, 0)
+        if count >= self._MAX_PROGRESS_CONTINUATIONS_PER_LEVEL:
+            return False
+        available = set(str(a) for a in (getattr(after_snapshot, "available_actions", ()) or ()))
+        steps: list[TestStep] = []
+        for step in item.test_plan:
+            if getattr(step, "action_id", None) is None or step.action_id not in available:
+                break
+            steps.append(step)
+        if not steps:
+            return False
+        self._continuation_count_by_level[level] = count + 1
+        continuation = HypothesisItem(
+            hypothesis_id=stable_hash((item.hypothesis_id, level, count + 1, "continuation"), "hyp_"),
+            source="confirmed_continuation",
+            claim=f"Continue confirmed effect: {item.claim}",
+            truth=TriTruth.TRUE,
+            relevance=Relevance.RELEVANT,
+            validity=Validity.UNCHECKED,
+            progress=Progress.UNKNOWN,
+            test_plan=tuple(steps),
+            cursor=0,
+            priority=item.priority + 1.0,
+            confidence=item.confidence,
+            expiry_step=None,
+            evidence_refs=item.evidence_refs,
+            suppression_signature=stable_hash((item.suppression_signature, level, count + 1), "sup_"),
+            created_state_signature=str(getattr(after_snapshot, "semantic_state_signature", "") or ""),
+            proposal_batch_id="",
+            semantic_objective=item.semantic_objective,
+            semantic_binding=item.semantic_binding,
+            trajectory_start_snapshot=after_snapshot,
+            trajectory_verified=True,
+        )
+        self.confirmed_rules.append(continuation)
+        self._sort()
+        return True
+
     def current_questions(self, config: V8Config, snapshot: ARGALiteSnapshot | None = None) -> list[str]:
         questions: list[str] = []
         if snapshot is not None:
@@ -1209,7 +1405,19 @@ class HypothesisBank:
             executable = self.has_valid_action_candidates()
         if not executable:
             questions.append("No executable grounded hypothesis remains; propose 1-3 hypotheses for what must be done to advance to the next level, each with a complete verifier-gated action sequence from the current state using only valid ids.")
-        questions.extend([f"Unresolved: {h.claim}" for h in self.semantic_test_queue[: config.max_memory_notes_in_packet] if h.truth is TriTruth.UNKNOWN])
+        unresolved_pool = [
+            h
+            for h in (self.verified_semantic + self.semantic_test_queue)
+            if h.truth is TriTruth.UNKNOWN
+        ]
+        questions.extend([
+            (
+                f"Offline-verified ready: {h.claim}"
+                if getattr(h, "trajectory_verified", False)
+                else f"Unresolved: {h.claim}"
+            )
+            for h in unresolved_pool[: config.max_memory_notes_in_packet]
+        ])
         return questions[: config.max_memory_notes_in_packet]
 
     def current_coordinate_questions(self, config: V8Config) -> list[str]:
@@ -1218,7 +1426,13 @@ class HypothesisBank:
     def _find(self, hypothesis_id: str | None) -> HypothesisItem | None:
         if not hypothesis_id:
             return None
-        for item in self.confirmed_rules + self.semantic_test_queue + self.coordinate_test_queue + self.fallback_exploration_queue:
+        for item in (
+            self.confirmed_rules
+            + self.verified_semantic
+            + self.semantic_test_queue
+            + self.coordinate_test_queue
+            + self.fallback_exploration_queue
+        ):
             if item.hypothesis_id == hypothesis_id:
                 return item
         return None
@@ -1229,6 +1443,7 @@ class HypothesisBank:
         return item.validity is not Validity.INVALID and item.has_next_step() and item.truth is not TriTruth.FALSE
 
     def _purge_consumed_and_invalid(self, current_step: int) -> None:
+        self.verified_semantic = [h for h in self.verified_semantic if self._usable(h, current_step)]
         self.semantic_test_queue = [h for h in self.semantic_test_queue if self._usable(h, current_step)]
         self.coordinate_test_queue = [h for h in self.coordinate_test_queue if self._usable(h, current_step)]
         self.fallback_exploration_queue = [h for h in self.fallback_exploration_queue if self._usable(h, current_step)]
@@ -1237,7 +1452,13 @@ class HypothesisBank:
             self._active_hypothesis_id = None
 
     def _sort(self) -> None:
-        for queue in (self.confirmed_rules, self.semantic_test_queue, self.coordinate_test_queue, self.fallback_exploration_queue):
+        for queue in (
+            self.confirmed_rules,
+            self.verified_semantic,
+            self.semantic_test_queue,
+            self.coordinate_test_queue,
+            self.fallback_exploration_queue,
+        ):
             queue.sort(key=lambda h: (-h.priority, -h.confidence, h.hypothesis_id))
 
 
@@ -1282,6 +1503,48 @@ def _expanded_action_runs(value: Any) -> list[tuple[str, str | None]]:
         if len(out) > 50:
             return []
     return out
+
+
+def _infer_coordinate_candidate_id(snapshot: "ARGALiteSnapshot", referenced_object_ids: set[str]) -> str | None:
+    """Bind a missing/hallucinated coordinate candidate to a referenced object.
+
+    Small VL models often describe the click target through objective objects
+    but omit the whitelisted candidate id. When exactly one whitelisted
+    candidate intersects the referenced objects the binding is unambiguous;
+    with several candidates the highest-salience one wins (the trajectory
+    verifier remains the authority on the repaired binding).
+    """
+    targets = list(getattr(snapshot, "coordinate_targets", ()) or ())
+    if not targets:
+        return None
+    if referenced_object_ids:
+        matched = [c for c in targets if c.object_id in referenced_object_ids]
+    else:
+        matched = []
+    if not matched:
+        return None
+    best = max(matched, key=lambda c: (float(getattr(c, "salience_score", 0.0)), str(c.candidate_id)))
+    return str(best.candidate_id)
+
+
+def _write_repaired_candidate_ids(raw: dict[str, Any], repaired_steps: list[tuple[str, str | None]], coordinate_action_ids: set[str]) -> None:
+    """Write repaired candidate ids back into raw action_runs (repeat==1 enforced upstream)."""
+    runs = raw.get("action_runs")
+    if not isinstance(runs, list):
+        return
+    queue = [candidate_id for action_id, candidate_id in repaired_steps if action_id in coordinate_action_ids]
+    cursor = 0
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        if _none_or_str(run.get("action_id")) not in coordinate_action_ids:
+            continue
+        if cursor >= len(queue):
+            break
+        candidate_id = queue[cursor]
+        cursor += 1
+        if candidate_id is not None:
+            run["coordinate_candidate_id"] = candidate_id
 
 
 def _v87_matching_failed_trajectory(raw: dict[str, Any], packet: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1686,6 +1949,32 @@ def _v87_trajectory_respects_control_context(raw: dict[str, Any], packet: dict[s
         if observed_groups and active_group not in observed_groups:
             return False
     return True
+
+
+def _v87_changed_object_internal_ids(
+    action_id: str,
+    packet: dict[str, Any],
+    alias_to_internal: dict[str, str],
+    valid_objects: set[str],
+) -> list[str]:
+    """Internal ids of planning objects whose centroid changed under action_id.
+
+    Packet action diffs speak in model aliases (o0, o1, ...); trajectories and
+    contracts speak in internal tracked ids. The shared alias table keeps both
+    channels referring to the same object.
+    """
+    if packet.get("schema_version") != "v8.8.layered_observation":
+        return []
+    resolved: list[str] = []
+    for diff in _layered_action_diffs(packet, action_id):
+        for change in diff.get("object_changes") or []:
+            if not isinstance(change, dict) or not _layered_centroid_changed(change):
+                continue
+            alias = str(change.get("object_id") or "")
+            internal = alias_to_internal.get(alias, alias)
+            if internal in valid_objects and internal not in resolved:
+                resolved.append(internal)
+    return resolved
 
 
 def _v87_contract_kind(raw: dict[str, Any], action_id: str, packet: dict[str, Any] | None) -> str:

@@ -49,17 +49,21 @@ class V8Config:
     prompt_tail_priority_enabled: bool = True
 
     max_qwen_calls_per_game: int = 20
-    max_primary_qwen_calls_per_level: int = 1
+    # Per-attempt budgets (reset on every level attempt). Primary > 1 lets the
+    # agent re-consult Qwen inside the same attempt after a partially successful
+    # trajectory empties the executable queue, instead of flailing until the
+    # dead-attempt reset grants a fresh budget.
+    max_primary_qwen_calls_per_level: int = 3
     max_reserve_qwen_calls_per_level: int = 0
     max_coordinate_qwen_calls_per_level: int = 1
-    max_total_qwen_calls_per_level: int = 2
+    max_total_qwen_calls_per_level: int = 6
     min_steps_between_qwen_calls: int = 3
     qwen_stall_threshold: int = 3
 
     include_full_grid_in_qwen_packet: bool = True
     include_object_local_masks: bool = True
     include_component_graph_in_qwen_packet: bool = True
-    frame_png_cell_scale: int = 8
+    frame_png_cell_scale: int = 16
     max_hex_patches_in_packet: int = 16
     max_hex_patch_side: int = 24
     max_action_diffs_in_packet: int = 20
@@ -94,6 +98,10 @@ class V8Config:
     max_coordinate_candidates_in_packet: int = 96
     max_coordinate_probes_per_level: int = 24
     max_coordinate_probe_repeats_per_signature: int = 1
+    # Accumulative click mechanics (e.g. cycling a cell through a palette by
+    # repeated clicks — ft09-style) require the same coordinate target several
+    # times inside one trajectory. Cap repeats instead of forbidding them.
+    max_coordinate_target_repeats_in_trajectory: int = 6
     max_same_state_action_repeats: int = 1
     reject_unchanged_failed_trajectories: bool = True
 
