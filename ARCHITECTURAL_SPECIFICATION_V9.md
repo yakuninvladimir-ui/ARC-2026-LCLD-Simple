@@ -77,12 +77,14 @@ The supplied artifact inspected for this specification has the following
 identity:
 
 ```text
-notebook: arc-prize-2026-lcld-qwen-v9(1).ipynb
-notebook SHA-256: 12917cc19473f47ccfcf9d551d7296ba331a0168deb57e1a2f3584e999b1f023
-embedded payload ZIP SHA-256: c128de29006dd2b25e85ab577c385bee2fe99a48c9249659ac57812b2fef67cf
-embedded payload bytes: 145125
-embedded active source files: 29
-embedded Python package version: 9.0.0
+repository layout: v9_agent/ (35 Python files), notebook_wrapper/ (5 Python files), build_notebook_v9.py
+active v9_agent source files: 31 (excluding test_* facades)
+package version: 9.0.0
+source compileall: PASS
+fake-backend session creation: PASS
+one-action pending-token commit smoke: PASS
+real Qwen inference: NOT EXECUTED IN THIS AUDIT
+real ARC gateway/scorecard run: NOT EXECUTED IN THIS AUDIT
 ```
 
 The active payload compiles successfully under the available Python runtime.
@@ -1380,7 +1382,7 @@ The architecture is conformant only when all of the following hold:
     reasoning after `GAME_OVER`.
 23. Accepted gateway transitions are ingested immediately.
 24. The real model is not required for deterministic tests.
-25. The embedded source compiles and imports without network access.
+25. All v9_agent and notebook_wrapper Python files compile and import without network access.
 
 ## 25. Change discipline
 

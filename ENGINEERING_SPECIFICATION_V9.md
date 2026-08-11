@@ -39,11 +39,8 @@ every primitive action boundary.
 ### 0.1 Artifact and validation snapshot
 
 ```text
-notebook: arc-prize-2026-lcld-qwen-v9(1).ipynb
-notebook SHA-256: 12917cc19473f47ccfcf9d551d7296ba331a0168deb57e1a2f3584e999b1f023
-embedded payload ZIP SHA-256: c128de29006dd2b25e85ab577c385bee2fe99a48c9249659ac57812b2fef67cf
-embedded payload bytes: 145125
-active embedded source files: 29
+repository layout: v9_agent/ (35 Python files), notebook_wrapper/ (5 Python files), build_notebook_v9.py
+active v9_agent source files: 31 (excluding test_* facades)
 package version: 9.0.0
 source compileall: PASS
 fake-backend session creation: PASS
@@ -68,13 +65,18 @@ packet builder whose behavior can diverge silently from the competition path.
 
 ## 1. Active source layout
 
-The embedded source tree is:
+The repository source tree is:
 
 ```text
-Code/
-  submission.py
-  kaggle_agent.py
-  lcld_competition_child.py
+workspace/
+  build_notebook_v9.py
+  notebook_wrapper/
+    working_common_v9.py
+    working_header.md
+    working_install.py
+    working_phase_a.py
+    working_phase_b.py
+    working_phase_b_parent.py
   v9_agent/
     __init__.py
     action_adapter.py
@@ -93,24 +95,30 @@ Code/
     logging.py
     memory.py
     observe.py
+    planning_set.py
     policy.py
     qwen_packet.py
     qwen_roles.py
     relations.py
     reverse_semantics.py
     session.py
+    trajectory.py
     types.py
     verification.py
-    README.md
+    verifier_packet.py
+    test_*.py (integration test facades)
 ```
 
 ### 1.1 Module responsibilities
 
 | Module | Active responsibility |
 |---|---|
-| `submission.py` | Competition default configuration and ARC frame normalization helpers. |
-| `kaggle_agent.py` | Framework-compatible agent wrapper, explicit transition ingestion, reset guard, telemetry, cleanup. |
-| `lcld_competition_child.py` | Isolated direct game loop, worker concurrency, scorecard lifecycle, result manifest. |
+| `build_notebook_v9.py` | Notebook builder, payload ZIP creation, wrapper injection. |
+| `notebook_wrapper/working_common_v9.py` | Common utilities for notebook phases, smoke tests, config helpers. |
+| `notebook_wrapper/working_install.py` | Installation stub for notebook environment. |
+| `notebook_wrapper/working_phase_a.py` | Phase A: exploration and hypothesis generation. |
+| `notebook_wrapper/working_phase_b.py` | Phase B: semantic trajectory execution and verification. |
+| `notebook_wrapper/working_phase_b_parent.py` | Parent orchestration for Phase B workers. |
 | `v9_agent/__init__.py` | Public API, package version, `V9Config` alias. |
 | `config.py` | Frozen configuration dataclass, environment and mapping overrides, clamping. |
 | `types.py` | All enums and immutable transport dataclasses. |
@@ -132,10 +140,14 @@ Code/
 | `judge.py` | Official transition comparison and fixed-contract judgment. |
 | `memory.py` | Game memory, tracks, attempts, action diffs, semantic feedback, rebinding. |
 | `policy.py` | Priority selection among confirmed, coordinate, semantic, and research queues. |
+| `planning_set.py` | Planning set management for trajectory hypotheses. |
 | `deliberation.py` | Bounded deterministic deliberation helpers. |
 | `action_adapter.py` | Candidate-to-ARC action and payload compatibility facade. |
 | `logging.py` | Structured trace and telemetry helpers. |
 | `session.py` | Main state machine and exactly-once official transition commit. |
+| `trajectory.py` | Trajectory storage and replay utilities. |
+| `verifier_packet.py` | Verifier packet construction for evidence transport. |
+| `test_*.py` | Integration test facades (not part of competition runtime). |
 
 ### 1.2 Public package API
 
@@ -1697,55 +1709,48 @@ A failed attempt can reset only when:
 Before emitting reset, the session records the attempt with its exact complete
 execution and verifier feedback.
 
-## 19. Framework-compatible agent wrapper
+## 19. Notebook wrapper and phase orchestration
 
-`kaggle_agent.ARC_AGI_Agent` must:
+### 19.1 Build script
 
-- construct one `GameSession`;
-- accept dynamic config updates through the active session;
-- normalize framework observations;
-- call `session.act()`;
-- convert returned action dictionaries to the expected ARC action type;
-- expose explicit `observe_action_result()`;
-- perform a guarded fallback ingestion in `act()` only when the framework did
-  not explicitly ingest the accepted result;
-- expose `reset_after_game_over()` that validates current official state and
-  returns only a reset action;
-- expose bounded telemetry;
-- clean up backend resources.
+`build_notebook_v9.py` must:
 
-The fallback ingestion path must be idempotent and must not double-commit a
-transition already ingested explicitly.
+- create the output notebook from `working_header.md`;
+- inject Python cells for `working_install.py`, `working_common_v9.py`, `working_phase_a.py`, `working_phase_b.py`, `working_phase_b_parent.py`;
+- embed the `v9_agent/` payload as a base64 ZIP;
+- write extraction and import logic into the notebook;
+- validate compilation of all embedded files;
+- optionally run smoke tests against a fake backend.
 
-## 20. Direct competition child
+### 19.2 Phase A: exploration
 
-### 20.1 Process isolation
+`notebook_wrapper/working_phase_a.py`:
 
-`lcld_competition_child.py` runs as a separate process launched by the notebook
-supervisor. It owns the live ARC SDK import and direct gateway loop. Model server
-failure, game worker failure, and scorecard finalization are isolated from the
-notebook setup process.
+- initializes the agent with exploration-friendly config;
+- runs simple action probes and coordinate research;
+- collects action effects and invariant candidates;
+- stores results in shared memory or disk manifests.
 
-### 20.2 Concurrency
+### 19.3 Phase B: semantic trajectory execution
 
-The child uses a thread pool with default game concurrency `16`. The vLLM server
-uses `max_num_seqs=4`. The implementation must tolerate queued model calls and
-must enforce per-game wall-clock limits independently.
+`notebook_wrapper/working_phase_b.py`:
 
-### 20.3 Environment creation
+- loads Phase A evidence;
+- configures the agent for semantic trajectory mode;
+- executes primary Qwen calls with reverse-semantic binding;
+- manages reset-based sibling alternative comparison;
+- records trajectory-level evaluations and final actions.
 
-Each game environment is created lazily and at most once per worker game. The
-implicit gateway reset associated with `make()` is counted in orchestration
-telemetry. The direct loop must not perform an unconditional second initial
-reset.
+### 19.4 Phase B parent orchestrator
 
-### 20.4 Accepted action loop
+`notebook_wrapper/working_phase_b_parent.py`:
 
-For each game:
+- spawns Phase B workers;
+- manages shared scorecard and result manifest;
+- enforces global time and action limits;
+- aggregates per-game outcomes.
 
-1. read the current official frame;
-2. stop on success terminal;
-3. on `GAME_OVER`, perform exactly one legal reset before any analyzer/model
+The wrapper modules must not contain duplicate policy, verifier, memory, or packet-building logic that can diverge from the `v9_agent` package.
    call;
 4. request one action from the delegate session;
 5. enforce action and wall-clock limits;
@@ -2093,42 +2098,29 @@ Required tests:
 
 ## 24. Validation commands
 
-### 24.1 Notebook integrity
+### 24.1 Repository integrity
 
 ```bash
-sha256sum arc-prize-2026-lcld-qwen-v9.ipynb
+find v9_agent -name "*.py" -type f | wc -l
+find notebook_wrapper -name "*.py" -type f | wc -l
+python -m compileall -q v9_agent/
+python -m compileall -q notebook_wrapper/
+python build_notebook_v9.py --help
 ```
 
-Expected notebook hash for the supplied artifact:
+Expected active file counts: `35` in `v9_agent/`, `5` in `notebook_wrapper/`.
 
-```text
-12917cc19473f47ccfcf9d551d7296ba331a0168deb57e1a2f3584e999b1f023
-```
-
-### 24.2 Embedded source extraction
-
-Use a deterministic extraction utility that:
-
-1. loads notebook JSON;
-2. locates the embedded base64 ZIP constant;
-3. decodes once;
-4. validates ZIP integrity;
-5. rejects path traversal;
-6. extracts into a clean directory;
-7. counts non-cache files.
-
-Expected active file count: `29`.
-
-### 24.3 Compilation
+### 24.2 Compilation
 
 ```bash
-python -m compileall -q extracted/Code
+python -m compileall -q v9_agent/
+python -m compileall -q notebook_wrapper/
 ```
 
-### 24.4 Import smoke
+### 24.3 Import smoke
 
 ```bash
-PYTHONPATH=extracted/Code python - <<'PY'
+python - <<'PY'
 from v9_agent import V9Config, GameSession, __version__
 assert __version__ == "9.0.0"
 assert V9Config().allow_qwen_raw_coordinates is False
@@ -2137,7 +2129,7 @@ print(session.harness_telemetry())
 PY
 ```
 
-### 24.5 Exactly-once transition smoke
+### 24.4 Exactly-once transition smoke
 
 Construct a small legal grid with one available action, call `act()`, supply a
 changed official observation to `observe_action_result()`, and assert:
@@ -2188,7 +2180,7 @@ fake gateway and fake scorecard but must exercise the same child state machine.
 
 A V9 implementation is complete only when:
 
-- all 29 active payload files compile;
+- all v9_agent and notebook_wrapper Python files compile;
 - public imports and alias behavior are stable;
 - the grid, palette, and coordinate contracts are enforced;
 - action research gates primary semantic planning;

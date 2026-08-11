@@ -37,7 +37,7 @@ VLLM_WHEELHOUSE_DATASET_SOURCE = "driessmit1/arc3-vllm-h100-wheelhouse-v3"
 QWEN_MODEL_DATASET_SOURCE = "driessmit1/vrfai-qwen3-6-27b-fp8-hf-snapshot"
 COMPETITION_SOURCE = "arc-prize-2026-arc-agi-3"
 
-MARKER = "ARC_V9_SAFE_HARNESS_THINKING32K_STATIC_SCHEMA_SERIAL_GATEWAY"
+MARKER = "ARC_V9_SAFE_HARNESS_THINKING32K_DYNAMIC_ENUM_LCLD_CONCURRENCY5"
 MAX_NOTEBOOK_BYTES = 985_000
 
 PAYLOAD_EXCLUDED_DIRS = {".git", "__pycache__", ".pytest_cache", "notebooks", "assets"}
@@ -336,8 +336,8 @@ def _generated_submission_source() -> str:
                 "max_level_attempts": int(os.environ.get("LCLD_MAX_LEVEL_ATTEMPTS", "0")),
                 "max_actions_per_level": int(os.environ.get("LCLD_MAX_ACTIONS_PER_LEVEL", "500")),
                 "game_wall_clock_limit_seconds": int(float(os.environ.get("LCLD_GAME_WALL_CLOCK_LIMIT_SECONDS", "5000"))),
-                "max_game_over_resets_per_game": 0,
-                "max_game_over_resets_per_level": 0,
+                "max_game_over_resets_per_game": 40,
+                "max_game_over_resets_per_level": 40,
                 "reset_on_game_over": os.environ.get("LCLD_RESET_ON_GAME_OVER", "1").lower() in {"1", "true", "yes", "on"},
                 # Compatibility names used by the direct competition harness.
                 "llm_advisor_backend": os.environ.get("ARC_LLM_ADVISOR_BACKEND", "vllm"),
@@ -466,6 +466,21 @@ def _source_payload() -> str:
     if missing:
         raise SystemExit("V9 source tree is incomplete; missing: " + repr(missing))
 
+    # Compile-check all v9_agent/*.py files to catch syntax errors before packaging.
+    import py_compile
+    v9_agent_dir = ROOT / "v9_agent"
+    compile_errors: list[str] = []
+    for py_file in sorted(v9_agent_dir.glob("*.py")):
+        # Skip test files and __init__.py from strict compile check (they are still packaged).
+        if py_file.name.startswith("test_") or py_file.name == "__init__.py":
+            continue
+        try:
+            py_compile.compile(str(py_file), doraise=True)
+        except py_compile.PyCompileError as e:
+            compile_errors.append(f"{py_file.name}: {e}")
+    if compile_errors:
+        raise SystemExit("V9 source tree has compile errors:\n" + "\n".join(compile_errors))
+
     buffer = io.BytesIO()
     archived_files: list[str] = []
     excluded_files: list[str] = []
@@ -476,6 +491,10 @@ def _source_payload() -> str:
                     continue
                 rel = path.relative_to(ROOT).as_posix()
                 if any(part in PAYLOAD_EXCLUDED_DIRS for part in path.relative_to(ROOT).parts):
+                    excluded_files.append(rel)
+                    continue
+                # Exclude test files and documentation from the payload to save space.
+                if path.name.startswith("test_") or path.suffix == ".md":
                     excluded_files.append(rel)
                     continue
                 if path.suffix in PAYLOAD_EXCLUDED_SUFFIXES or rel in PAYLOAD_EXCLUDED_RELATIVE_PATHS:
@@ -707,9 +726,11 @@ def _adapt_working_phase_b_source(source: str) -> str:
                 'action_selection_timeout_s': 5000.0,
                 'major_cycle_wall_clock_budget_seconds': 5000,
                 'total_game_wall_clock_limit_seconds': 5000,
-                'max_level_attempts': int(os.environ.get('LCLD_MAX_LEVEL_ATTEMPTS', '0')),
+                'max_level_attempts': int(os.environ.get('LCLD_MAX_LEVEL_ATTEMPTS', '4')),
                 'max_actions_per_game': int(os.environ.get('LCLD_MAX_ACTIONS_PER_GAME', '500')),
                 'max_actions_per_level': int(os.environ.get('LCLD_MAX_ACTIONS_PER_LEVEL', '500')),
+                'max_game_over_resets_per_game': 40,
+                'max_game_over_resets_per_level': 40,
             })
             return config
         """
@@ -742,9 +763,19 @@ def _adapt_working_phase_b_source(source: str) -> str:
             )
 
             try:
+                max_actions = int(config.get('max_actions_per_game', 500))
                 while True:
                     if abort_event is not None and abort_event.is_set():
                         stop_reason = 'parallel_abort'
+                        break
+                    if max_actions > 0 and accepted_actions >= max_actions:
+                        stop_reason = 'max_actions_per_game_limit'
+                        _trace(
+                            'max_actions_limit_reached',
+                            game_id=game_id,
+                            accepted_action_count=accepted_actions,
+                            limit=max_actions,
+                        )
                         break
                     stop_reason = _terminal_reason(latest)
                     if stop_reason:
@@ -843,6 +874,11 @@ def _adapt_working_phase_b_source(source: str) -> str:
                         next_frame = _frame_data(raw_next)
                     except Exception as exc:
                         rejected_actions += 1
+                        error_str = str(exc)
+                        exc_type = type(exc).__name__
+                        # Distinguish recoverable gateway rejections (unavailable/invalid action)
+                        # from terminal errors. Recoverable errors should increment rejected_actions
+                        and continue the loop; only terminal errors should abort the game.
                         _trace(
                             'gateway_step_rejected',
                             game_id=game_id,
@@ -850,9 +886,15 @@ def _adapt_working_phase_b_source(source: str) -> str:
                             accepted_action_count=accepted_actions,
                             rejected_action_count=rejected_actions,
                             action=action_name,
-                            exc_type=type(exc).__name__,
-                            error=str(exc)[:2000],
+                            exc_type=exc_type,
+                            error=error_str[:2000],
                         )
+                        # Check for recoverable rejection patterns before re-raising.
+                        # Terminal errors (connection failures, internal server errors) still abort.
+                        _rejection_msg_lower = error_str.lower()
+                        if 'unavailable' in _rejection_msg_lower or 'invalid' in _rejection_msg_lower or 'rejected' in _rejection_msg_lower:
+                            # Recoverable: log and continue to next iteration for retry/alternative action.
+                            continue
                         raise
 
                     # Count only after the gateway returned a non-null, usable frame.

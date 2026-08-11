@@ -235,7 +235,7 @@ def _factual_relation(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _factual_coordinate_candidate(item: dict[str, Any]) -> dict[str, Any]:
-    keep = ("id", "object_id", "relation_id", "location_xy", "cell_value", "location_role")
+    keep = ("id", "object_id", "relation_id", "location_xy", "cell_value", "location_role", "observed_outcome")
     return {key: item.get(key) for key in keep if item.get(key) is not None}
 
 

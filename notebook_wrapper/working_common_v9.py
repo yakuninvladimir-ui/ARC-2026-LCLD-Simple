@@ -589,11 +589,16 @@ def setup_runtime(
 
 
 def phase_b_model_smoke_or_die():
-    """Run a minimal text-only inference probe before scorecard creation.
+    """Run a minimal inference probe before scorecard creation.
 
-    This deliberately does not test vision, reasoning extraction, or structured
-    output. Those are gameplay features and must not turn a pre-scorecard health
-    check into a long or parser-sensitive generation.
+    This tests:
+      - Basic text-only inference (simple OK response)
+      - Structured JSON-schema output (production transport with strict schema)
+      - Multi-image vision input (two images attached, matching agent behavior)
+
+    All three transports are exercised to catch vLLM configuration issues
+    (model loading, schema enforcement, per-prompt image limits) before
+    the competition run begins.
     """
     wait_for_vllm_server(timeout_seconds=VLLM_STARTUP_TIMEOUT_SECONDS)
     payload = {
@@ -604,7 +609,6 @@ def phase_b_model_smoke_or_die():
         }],
         'temperature': 0.0,
         'top_p': 1.0,
-        'top_k': 0,
         'max_tokens': 8,
         'chat_template_kwargs': {'enable_thinking': False},
     }
@@ -627,7 +631,6 @@ def phase_b_model_smoke_or_die():
             }],
             'temperature': 0.4,
             'top_p': 0.95,
-            'top_k': 30,
             'min_p': 0.05,
             'presence_penalty': 0.05,
             'repetition_penalty': 1.05,
@@ -679,7 +682,6 @@ def phase_b_model_smoke_or_die():
             }],
             'temperature': 0.0,
             'top_p': 1.0,
-            'top_k': 0,
             'max_tokens': 8,
             'chat_template_kwargs': {'enable_thinking': False},
         }

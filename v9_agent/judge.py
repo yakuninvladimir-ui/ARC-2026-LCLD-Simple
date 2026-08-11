@@ -36,7 +36,7 @@ class PreflightJudge:
         if is_coord:
             if candidate_action.x is None or candidate_action.y is None:
                 return PreflightResult(False, Validity.INVALID, "coordinate_payload_missing")
-            if not (0 <= int(candidate_action.x) <= 63 and 0 <= int(candidate_action.y) <= 63 and int(candidate_action.x) < snapshot.width and int(candidate_action.y) < snapshot.height):
+            if not (0 <= int(candidate_action.x) < snapshot.width and 0 <= int(candidate_action.y) < snapshot.height):
                 return PreflightResult(False, Validity.INVALID, "coordinate_out_of_bounds")
             if config.require_coordinate_candidate_id and candidate_action.coordinate_candidate_id is None:
                 return PreflightResult(False, Validity.INVALID, "coordinate_candidate_id_required")
@@ -68,7 +68,14 @@ class PreflightJudge:
             # confirmed-effect exploitation, not epistemic waste: hypothesis
             # trajectories legitimately re-apply confirmed actions, and each
             # visible effect changes the state signature, so this cannot loop.
-            last = next((ev for ev in reversed(memory.events) if ev.action and ev.action.get("id") == candidate_action.action_id), None)
+            # Filter events to current level only to avoid cross-level contamination.
+            current_level = int(getattr(snapshot, "level_index", 0) or 0)
+            last = next(
+                (ev for ev in reversed(memory.events)
+                 if ev.action and ev.action.get("id") == candidate_action.action_id
+                 and int(getattr(ev, "level_index", 0) or 0) == current_level),
+                None
+            )
             if last is not None and not (
                 last.progress is Progress.POSITIVE
                 or last.attribution is Attribution.ACTION_LINKED
@@ -184,8 +191,11 @@ class TransitionJudge:
                 outcome = "no_effect"
                 mechanic_result = MechanicResult.MISMATCH
             else:
+                # Changed cells exist but none are inside target regions.
+                # Unify semantics: changes outside target regions are negative effects.
                 truth, relevance, progress, reason = TriTruth.UNKNOWN, Relevance.UNDECIDED, Progress.UNKNOWN, "change_outside_target"
-                outcome = "negative_effect" if outside else "no_effect"
+                outcome = "negative_effect"
+                mechanic_result = MechanicResult.MISMATCH
             observed_information_gain = memory.resolve_question(contract.question_id, contract.question_type, contract.target_signature, outcome)
         elif contract.kind is VerificationContractKind.ACTION_SURFACE_CHANGE:
             changed = before.available_actions != after.available_actions
@@ -260,8 +270,8 @@ class TransitionJudge:
                 else:
                     progress = Progress.NEUTRAL
                     semantic_judgment = SemanticJudgment.IRRELEVANT
-            else:
-                progress = Progress.NEUTRAL
+            # else: do not downgrade progress from a prior POSITIVE assessment;
+            # leave progress as set by the contract branch or goal evaluation.
 
         affected_objects = _affected_objects(before, after, cells)
         object_deltas = _object_deltas(before, after, cells, affected_objects)

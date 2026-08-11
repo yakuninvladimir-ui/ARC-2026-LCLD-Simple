@@ -144,6 +144,8 @@ class HypothesisBank:
         return rebound_bindings
 
     def attempt_feedback(self, limit: int = 12) -> dict[str, Any]:
+        # Ensure limit is at least 1 to avoid returning the entire list when limit <= 0.
+        limit = max(1, int(limit))
         hypotheses = []
         seen: set[str] = set()
         for item in (
@@ -1157,7 +1159,7 @@ class HypothesisBank:
             ]
         active = self._find(self._active_hypothesis_id)
         if active is not None and self._usable(active, snapshot.step_index):
-            if not any(active in queue for queue in queues):
+            if not any(active is q for q in queues):
                 return None
             active_step = active.next_step()
             if active_step is None or active_step.action_id not in snapshot.available_actions:
@@ -1217,7 +1219,7 @@ class HypothesisBank:
         if self._active_hypothesis_id == item.hypothesis_id:
             self._active_hypothesis_id = None
         self.invalid_rejections.append({"reason": reason, "hypothesis_id": hypothesis_id})
-        if item not in self.rejected:
+        if not any(item is r for r in self.rejected):
             self.rejected.append(item)
         self._purge_consumed_and_invalid(snapshot.step_index)
         self._sort()
@@ -1269,7 +1271,7 @@ class HypothesisBank:
                 item.relevance = Relevance.IRRELEVANT
         if mechanics_mismatch and "qwen" in item.source:
             item.validity = Validity.INVALID
-            if item not in self.rejected:
+            if not any(item is r for r in self.rejected):
                 self.rejected.append(item)
             self.invalid_rejections.append({
                 "reason": "active_trajectory_effect_mismatch",
@@ -1283,11 +1285,11 @@ class HypothesisBank:
             item.priority += 2.0
             item.confidence = min(1.0, item.confidence + 0.25)
             # A concrete plan is not a reusable mechanic. Keep only remaining steps.
-            if item.has_next_step() and "qwen" not in item.source and item not in self.confirmed_rules:
+            if item.has_next_step() and "qwen" not in item.source and not any(item is c for c in self.confirmed_rules):
                 self.confirmed_rules.append(item)
         elif item.truth is TriTruth.FALSE or judgment.validity is Validity.INVALID:
             item.validity = Validity.INVALID
-            if item not in self.rejected:
+            if not any(item is r for r in self.rejected):
                 self.rejected.append(item)
         elif judgment.relevance is Relevance.IRRELEVANT:
             item.priority -= 1.0
@@ -1364,7 +1366,8 @@ class HypothesisBank:
             return False
         available = set(str(a) for a in (getattr(after_snapshot, "available_actions", ()) or ()))
         steps: list[TestStep] = []
-        for step in item.test_plan:
+        # Keep only remaining steps starting from the current cursor position.
+        for step in item.test_plan[item.cursor:]:
             if getattr(step, "action_id", None) is None or step.action_id not in available:
                 break
             steps.append(step)
