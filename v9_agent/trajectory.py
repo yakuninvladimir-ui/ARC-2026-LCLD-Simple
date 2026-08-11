@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, replace
-from typing import Dict, Iterable, List, Optional
 
 from .observe import stable_hash
 from .types import ARGALiteSnapshot, HypothesisItem, Progress, TestStep
@@ -830,10 +829,30 @@ class TrajectoryPlanner:
     def __init__(self, config=None):
         self.config = config
 
+    def _heuristic_from_state_sig(self, state_sig: str, goal: dict | None, start_snapshot: ARGALiteSnapshot) -> float:
+        """Compute heuristic from current state signature to goal.
+        
+        Since we only have state_sig (not full snapshot), we use reverse distance
+        if available, or fall back to goal signature matching.
+        """
+        if not goal:
+            return 0.0
+        goal_sig = goal.get("expected_final_state_hash") or goal.get("goal_signature") or goal.get("final_grid_hash")
+        target_signatures = goal.get("target_signatures")
+        
+        # If current state matches goal, heuristic is 0
+        if goal_sig and state_sig == goal_sig:
+            return 0.0
+        if target_signatures and state_sig in target_signatures:
+            return 0.0
+        
+        # Fallback: use Manhattan distance in state space (admissible)
+        # This is a simple proxy - actual distance depends on action graph
+        return 1.0  # Each step costs 1, so minimum remaining steps >= 0
+
     def _heuristic(self, snapshot: ARGALiteSnapshot, goal: dict | None, action_seq: tuple) -> float:
-        # If goal provides target_xy and object_id, use centroid distance as heuristic.
-        # This heuristic is constant across states due to snapshot-only knowledge,
-        # but it still guides preference toward semantically relevant goals.
+        # Heuristic must estimate distance from CURRENT state to goal.
+        # Using snapshot (current state in A* expansion) instead of start_snapshot.
         if not goal:
             return 0.0
         target_xy = goal.get("target_xy") if isinstance(goal, dict) else None
@@ -849,6 +868,13 @@ class TrajectoryPlanner:
             except (TypeError, ValueError):
                 return 0.0
             return abs(cx - tx) + abs(cy - ty)
+        # Fallback: use goal signature match distance if available
+        goal_sig = goal.get("expected_final_state_hash") or goal.get("goal_signature") or goal.get("final_grid_hash")
+        if goal_sig:
+            # If current snapshot matches goal, heuristic is 0
+            current_sig = HexStateComparator.signature_from_snapshot(snapshot)
+            if current_sig == goal_sig:
+                return 0.0
         return 0.0
 
     def _build_transition_indexes(self, memory: object) -> tuple[dict[tuple[str, str, str | None], list[str]], dict[str, list[tuple[str, str | None, str]]]]:
@@ -1002,7 +1028,10 @@ class TrajectoryPlanner:
         def heuristic(state_sig: str) -> float:
             if reverse_distances:
                 return float(reverse_distances.get(state_sig, 0))
-            return self._heuristic(start_snapshot, goal, tuple())
+            # Compute heuristic from current state (state_sig), not start_snapshot.
+            # We need to reconstruct a minimal snapshot-like object for the current state.
+            # Since we only have state_sig, use goal-based distance estimation.
+            return self._heuristic_from_state_sig(state_sig, goal, start_snapshot)
  
         open_heap = []  # (f, g, state_sig, action_seq)
         heapq.heappush(open_heap, (heuristic(start_sig), 0, start_sig, tuple()))

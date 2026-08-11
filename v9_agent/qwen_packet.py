@@ -3414,8 +3414,8 @@ def _action_runs(records: list[dict[str, Any]], limit: int) -> list[dict[str, An
 def _validate_packet_references(packet: dict[str, Any]) -> None:
     """Validate packet references against the current object_layer schema.
     
-    Note: This function uses assert statements which are disabled in optimized mode.
-    For production validation, use _validate_layered_packet_references() instead.
+    This function performs runtime validation using explicit ValueError exceptions
+    (not assert statements) to ensure validation works even in optimized mode (-O).
     """
     layer = packet.get("object_layer") or {}
     scene = layer  # Alias for compatibility with existing code structure

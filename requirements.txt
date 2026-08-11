@@ -1,0 +1,10 @@
+# Core dependencies for v9_agent
+numpy>=1.24.0
+Pillow>=10.0.0
+requests>=2.28.0
+
+# Development dependencies (optional)
+# pytest>=7.0.0
+# black>=23.0.0
+# mypy>=1.0.0
+# ruff>=0.1.0
