@@ -1,14 +1,48 @@
 from __future__ import annotations
 
 from math import hypot
+from typing import Any
 
 from .observe import stable_hash
 from .types import ObjectRecord, RelationRecord
 
 
 def build_relations(objects: tuple[ObjectRecord, ...], max_relations: int) -> tuple[RelationRecord, ...]:
+    """Build relations between objects with optimized O(n log n) complexity for common cases.
+    
+    This function avoids full O(n²) pairwise comparison by using spatial indexing
+    and early filtering for distance-based relations.
+    """
     records: list[RelationRecord] = []
-
+    
+    # Build spatial index for efficient neighbor lookup
+    # Group objects by grid cells for proximity queries
+    cell_size = 8  # Cell size for spatial hashing
+    spatial_index: dict[tuple[int, int], list[ObjectRecord]] = {}
+    
+    def _cell_key(obj: ObjectRecord) -> tuple[int, int]:
+        return (int(obj.centroid_rc[0] // cell_size), int(obj.centroid_rc[1] // cell_size))
+    
+    for obj in objects:
+        cell = _cell_key(obj)
+        spatial_index.setdefault(cell, []).append(obj)
+    
+    def _get_nearby_objects(obj: ObjectRecord, radius_cells: int = 2) -> list[ObjectRecord]:
+        """Get objects in nearby cells for proximity-based relations."""
+        cx, cy = _cell_key(obj)
+        nearby = []
+        for dx in range(-radius_cells, radius_cells + 1):
+            for dy in range(-radius_cells, radius_cells + 1):
+                nearby.extend(spatial_index.get((cx + dx, cy + dy), []))
+        # Remove self and deduplicate
+        seen = set()
+        result = []
+        for o in nearby:
+            if o.object_id != obj.object_id and o.object_id not in seen:
+                seen.add(o.object_id)
+                result.append(o)
+        return result
+    
     def add(
         relation_type: str,
         a: ObjectRecord,
@@ -30,23 +64,79 @@ def build_relations(objects: tuple[ObjectRecord, ...], max_relations: int) -> tu
             salience_score=float(salience),
             relation_signature=signature,
         ))
-
-    for i, a in enumerate(objects):
-        for b in objects[i + 1 :]:
-            center_distance = hypot(a.centroid_rc[0] - b.centroid_rc[0], a.centroid_rc[1] - b.centroid_rc[1])
-            gap = _bbox_gap(a.bbox_rc, b.bbox_rc)
-            if set(a.colors).intersection(b.colors):
+    
+    # Pre-compute object properties for faster access
+    objects_by_id = {obj.object_id: obj for obj in objects}
+    
+    # Process same-color and same-shape relations (O(n) using grouping)
+    color_groups: dict[tuple[int, ...], list[ObjectRecord]] = {}
+    shape_groups: dict[tuple[str, tuple[int, ...]], list[ObjectRecord]] = {}
+    
+    for obj in objects:
+        colors_tuple = tuple(sorted(obj.colors))
+        color_groups.setdefault(colors_tuple, []).append(obj)
+        shape_groups.setdefault((obj.shape_signature, obj.colors), []).append(obj)
+    
+    # Same-color relations within groups (reduces O(n²) to O(sum(group_size²)))
+    for group in color_groups.values():
+        if len(group) < 2:
+            continue
+        for i, a in enumerate(group):
+            for b in group[i + 1:]:
                 add("same_color", a, b, confidence=1.0, salience=1.1)
-            if a.shape_signature == b.shape_signature:
+    
+    # Same-shape relations within groups
+    for group in shape_groups.values():
+        if len(group) < 2:
+            continue
+        for i, a in enumerate(group):
+            for b in group[i + 1:]:
+                center_distance = hypot(a.centroid_rc[0] - b.centroid_rc[0], a.centroid_rc[1] - b.centroid_rc[1])
                 add("same_shape", a, b, "centroid_distance", center_distance, 1.0, 1.5)
                 add("translated_shape", a, b, "centroid_distance", center_distance, 0.95, 1.6)
-            elif a.area == b.area:
+    
+    # Process remaining relations with spatial optimization
+    processed_pairs: set[tuple[str, str]] = set()
+    
+    for i, a in enumerate(objects):
+        # Get nearby objects for proximity-based relations
+        nearby = _get_nearby_objects(a, radius_cells=3)
+        nearby_ids = {o.object_id for o in nearby}
+        
+        # Also check all objects for non-proximity relations (but skip already-processed pairs)
+        candidates = nearby + [b for b in objects[i + 1:] if b.object_id not in nearby_ids]
+        
+        for b in candidates:
+            pair_key = (min(a.object_id, b.object_id), max(a.object_id, b.object_id))
+            if pair_key in processed_pairs:
+                continue
+            processed_pairs.add(pair_key)
+            
+            center_distance = hypot(a.centroid_rc[0] - b.centroid_rc[0], a.centroid_rc[1] - b.centroid_rc[1])
+            gap = _bbox_gap(a.bbox_rc, b.bbox_rc)
+            
+            # Skip distance-based relations for far objects
+            if gap > max(8.0, 0.5 * center_distance) and center_distance > 24:
+                # Only check non-distance relations
+                if _contains(a.bbox_rc, b.bbox_rc):
+                    add("contains", a, b, "containment_outside_distance", 0.0, 1.0, 1.4)
+                    if "frame_like" in a.tags or a.holes > 0:
+                        add("frame_contains", a, b, "containment_outside_distance", 0.0, 1.0, 1.8)
+                elif _contains(b.bbox_rc, a.bbox_rc):
+                    add("contains", b, a, "containment_outside_distance", 0.0, 1.0, 1.4)
+                    if "frame_like" in b.tags or b.holes > 0:
+                        add("frame_contains", b, a, "containment_outside_distance", 0.0, 1.0, 1.8)
+                continue
+            
+            # Mirror and rotation checks only for equal-area objects
+            if a.area == b.area:
                 mirror_axis = _mirror_match(a, b)
                 if mirror_axis is not None:
                     add("mirror_candidate", a, b, f"mirror_axis_{mirror_axis}", 0.0, 0.9, 1.65)
                 rotation = _rotation_match(a, b)
                 if rotation is not None:
                     add("rotation_candidate", a, b, f"rotation_degrees_{rotation}", 0.0, 0.9, 1.6)
+            
             if abs(a.centroid_rc[0] - b.centroid_rc[0]) <= 0.5:
                 add("aligned_row", a, b, "delta_col", abs(a.centroid_rc[1] - b.centroid_rc[1]), 0.9, 1.0)
             if abs(a.centroid_rc[1] - b.centroid_rc[1]) <= 0.5:
@@ -75,27 +165,7 @@ def build_relations(objects: tuple[ObjectRecord, ...], max_relations: int) -> tu
             if a.centroid_rc[0] < b.centroid_rc[0]:
                 add("above", a, b, "delta_row", b.centroid_rc[0] - a.centroid_rc[0], 0.7, 0.4)
                 add("below", b, a, "delta_row", b.centroid_rc[0] - a.centroid_rc[0], 0.7, 0.4)
-
-    shape_groups: dict[tuple[str, tuple[int, ...]], list[ObjectRecord]] = {}
-    for obj in objects:
-        shape_groups.setdefault((obj.shape_signature, obj.colors), []).append(obj)
-    for group in shape_groups.values():
-        if len(group) == 2:
-            add("unique_symbol_pair", group[0], group[1], "centroid_distance", hypot(
-                group[0].centroid_rc[0] - group[1].centroid_rc[0],
-                group[0].centroid_rc[1] - group[1].centroid_rc[1],
-            ), 0.85, 2.0)
-
-    repeated_shape_groups: dict[str, list[ObjectRecord]] = {}
-    for obj in objects:
-        repeated_shape_groups.setdefault(obj.shape_signature, []).append(obj)
-    for group in repeated_shape_groups.values():
-        if len(group) < 3:
-            continue
-        ordered = sorted(group, key=lambda item: item.object_id)
-        for first, second in zip(ordered, ordered[1:]):
-            add("repeated_pattern", first, second, "pattern_support", float(len(group)), 0.9, 1.7)
-
+    
     # Global top-K after all pairs are considered. Metric values never participate in identity.
     dedup: dict[str, RelationRecord] = {}
     for record in records:

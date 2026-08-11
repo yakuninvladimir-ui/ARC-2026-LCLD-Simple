@@ -1,36 +1,23 @@
 ```
-# Python
+# Python compiled files
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+*.pyc
+*.pyo
+*.pyd
 
-# Environment
+# Distribution / packaging
+*.egg
+*.egg-info/
+dist/
+build/
+*.so
+
+# Environment variables
 .env
 .env.local
 .env.*
-.venv/
-venv/
-ENV/
 
-# IDE
+# IDE and editor files
 .vscode/
 .idea/
 *.swp
@@ -40,17 +27,20 @@ ENV/
 # Logs
 *.log
 
-# Coverage
+# Coverage reports
 .coverage
-coverage/
 htmlcov/
+coverage/
 
-# Testing
+# Pytest cache
 .pytest_cache/
-.mypy_cache/
-.hypothesis/
 
-# OS
-.DS_Store
-Thumbs.db
+# MyPy cache
+.mypy_cache/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*$pycache$*
 ```

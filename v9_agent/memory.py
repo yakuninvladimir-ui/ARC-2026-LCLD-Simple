@@ -1565,11 +1565,30 @@ def _binding_object_match_score(fingerprint: dict[str, Any], obj: ObjectRecord) 
     return score
 
 
+def _json_safe_value(value: Any) -> Any:
+    """Convert a value to JSON-safe types."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+    if hasattr(value, "value"):
+        # Enum-like objects
+        return str(value.value)
+    return str(value)
+
+
 def event_to_dict(ev: MemoryEvent) -> dict[str, Any]:
     out = asdict(ev)
     for key in ("truth", "relevance", "validity", "progress", "attribution"):
         value = out.get(key)
         out[key] = value.value if hasattr(value, "value") else value
+    # Ensure action is JSON-safe (it comes from to_arc_action() which returns a dict)
+    if out.get("action") is not None:
+        out["action"] = _json_safe_value(out["action"])
     return out
 
 
