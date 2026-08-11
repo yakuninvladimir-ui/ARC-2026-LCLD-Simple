@@ -741,7 +741,7 @@ def gateway_handshake_or_die():
 
 
 # === PHASE A HEAVY COMBAT SMOKE (диагностика; для финального сабмита выключить) ===
-PHASE_A_HEAVY_SMOKE = True
+PHASE_A_HEAVY_SMOKE = False
 HEAVY_SMOKE_WORKERS = VLLM_MAX_NUM_SEQS      # воспроизводим боевой параллелизм
 HEAVY_SMOKE_ROUNDS = 2
 HEAVY_SMOKE_REQ_TIMEOUT = 600                # верхняя граница на один запрос (снижено с 2400)

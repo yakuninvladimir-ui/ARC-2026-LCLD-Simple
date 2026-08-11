@@ -77,8 +77,8 @@ The supplied artifact inspected for this specification has the following
 identity:
 
 ```text
-repository layout: v9_agent/ (35 Python files), notebook_wrapper/ (5 Python files), build_notebook_v9.py
-active v9_agent source files: 31 (excluding test_* facades)
+repository layout: v9_agent/ (28 Python files), notebook_wrapper/ (5 Python files), build_notebook_v9.py
+active v9_agent source files: 28 (excluding test_* facades)
 package version: 9.0.0
 source compileall: PASS
 fake-backend session creation: PASS
