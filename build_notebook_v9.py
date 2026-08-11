@@ -878,7 +878,7 @@ def _adapt_working_phase_b_source(source: str) -> str:
                         exc_type = type(exc).__name__
                         # Distinguish recoverable gateway rejections (unavailable/invalid action)
                         # from terminal errors. Recoverable errors should increment rejected_actions
-                        and continue the loop; only terminal errors should abort the game.
+                        # and continue the loop; only terminal errors should abort the game.
                         _trace(
                             'gateway_step_rejected',
                             game_id=game_id,

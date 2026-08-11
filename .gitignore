@@ -1,48 +1,54 @@
 ```
-# Logs and temp files
-*.log
-*.tmp
-*.swp
+# Jupyter notebooks
+*.ipynb_checkpoints/
+.ipynb_checkpoints/
 
-# Environment files
-.env
-.env.local
-.env.*
-
-# Dependencies
-.venv/
-venv/
+# Python
 __pycache__/
 *.pyc
-*$py.class
-*.so
+*.pyo
+*.pyd
 .Python
+*.so
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+.mypy_cache/
+.tox/
+.venv/
+venv/
 env/
 ENV/
 
 # Build artifacts
 build/
 dist/
+*.egg
 *.egg-info/
+.sass-cache/
+.wafpickle-*
+coverage/
+htmlcov/
 
-# Editors
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
+.env.*
+!.env.example
+
+# IDE specific
 .vscode/
 .idea/
-
-# Coverage reports
-.coverage
-htmlcov/
-coverage/
-
-# OS generated files
+*.swp
+*.swo
+*~
 .DS_Store
 Thumbs.db
 
-# Python specific
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-ENV/
+# Kernel metadata
+kernel-metadata.json
 ```
