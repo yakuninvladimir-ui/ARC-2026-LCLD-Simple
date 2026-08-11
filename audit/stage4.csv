@@ -1,0 +1,11 @@
+﻿#,Файл,Место,Проблема,Исправление
+22,v9_agent/deliberation.py,choose_qwen_role(is_new_level=...),Параметр не используется,Удалить или реально задействовать
+23,v9_agent/qwen_roles.py,can_call_qwen_role(),min_steps_between_qwen_calls фактически отключён (ignore_spacing=True почти всегда),Задокументировать или убрать конфиг
+24,v9_agent/session.py,LevelRunLimitReached,"Объявлен, но в session.py не выбрасывается нигде",Найти/добавить источник (см. #8)
+25,working_common_v9.py,Докстринг phase_b_model_smoke_or_die,"Утверждает, что vision/structured-output не тестируются, но код тестирует",Обновить докстринг
+26,build_notebook_v9.py,_adapt_working_common_source()", "_preflight_script_source(),Мёртвый код (не вызываются в build()),Удалить или подключить
+27,build_notebook_v9.py,_source_payload(),Файлы v9_agent/* не проходят compile-проверку при сборке; в payload упаковываются test_*.py и *.md (расход лимита 985 KB),Добавить py_compile всех файлов; исключить тесты/docs из payload
+28,v9_agent/hypothesis_bank.py,attempt_feedback(limit),hypotheses[-limit:] при limit <= 0 возвращает весь список,"limit = max(1, int(limit))"
+29,MARKER / env,MARKER = '...STATIC_SCHEMA_SERIAL_GATEWAY',Не соответствует фактическому ARC_QWEN_SCHEMA_MODE='dynamic_enum' и LCLD_GAME_CONCURRENCY=5,Обновить имя маркера
+30,v9_agent/judge.py,"LOCAL_TARGET_CHANGE, ветка "else,outcome='no_effect' при изменившихся клетках вне (пустых) регионов; mechanic_result" не выставлен (UNKNOWN), в соседних ветках MISMATCH",Привести ветки к единой семантике
+31,v9_agent/policy.py,safe_fallback(),Каждый вызов создаёт одноразовый ActionExplorer (состояние не сохраняется),Переиспользовать self"-explorer, если fallback когда-либо станет stateful"
