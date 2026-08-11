@@ -1,9 +1,0 @@
-[project]
-name = "arc-v8-3-agent"
-version = "8.3.0"
-description = "ARC-AGI-3 compact verified hypothesis agent"
-requires-python = ">=3.12"
-
-[tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["tests"]
