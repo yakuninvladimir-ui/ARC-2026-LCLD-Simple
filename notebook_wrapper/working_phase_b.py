@@ -241,6 +241,12 @@ if IS_PHASE_B_CANDIDATE:
 
     def _direct_config():
         config = default_config()
+        thinking_enabled = os.environ.get('ARC_QWEN_ENABLE_THINKING', 'true').strip().lower() in {'1', 'true', 'yes', 'on'}
+        reasoning_budget_tokens = (
+            int(os.environ.get('ARC_QWEN_REASONING_BUDGET_TOKENS', '32000'))
+            if thinking_enabled
+            else 0
+        )
         config.update({
             'allow_in_memory_env': True,
             'environment_adapter': None,
@@ -250,21 +256,26 @@ if IS_PHASE_B_CANDIDATE:
             'qwen_minimum_acceptance_context_tokens': 65536,
             'qwen_max_input_tokens': int(os.environ.get('ARC_QWEN_MAX_INPUT_TOKENS', '65536')),
             'qwen_max_output_tokens': int(os.environ.get('ARC_QWEN_MAX_OUTPUT_TOKENS', '49152')),
-            'qwen_enable_thinking': True,
-            'qwen_reasoning_mode': 'on',
-            'qwen_reasoning_budget_tokens': int(os.environ.get('ARC_QWEN_REASONING_BUDGET_TOKENS', '32000')),
-            'qwen_temperature': 0.6,
-            'qwen_top_p': 0.95,
-            'qwen_top_k': 20,
-            'qwen_presence_penalty': 0.0,
+            'qwen_enable_thinking': thinking_enabled,
+            'qwen_reasoning_mode': 'on' if thinking_enabled else 'off',
+            'qwen_reasoning_budget_tokens': reasoning_budget_tokens,
+            'qwen_temperature': float(os.environ.get('ARC_QWEN_TEMPERATURE', '0.4')),
+            'qwen_top_p': float(os.environ.get('ARC_QWEN_TOP_P', '0.95')),
+            'qwen_top_k': int(os.environ.get('ARC_QWEN_TOP_K', '30')),
+            'qwen_min_p': float(os.environ.get('ARC_QWEN_MIN_P', '0.05')),
+            'qwen_presence_penalty': float(os.environ.get('ARC_QWEN_PRESENCE_PENALTY', '0.05')),
+            'qwen_repeat_penalty': float(os.environ.get('ARC_QWEN_REPEAT_PENALTY', '1.05')),
             'qwen_strict_required': True,
-            'qwen_timeout_seconds': int(os.environ.get('ARC_QWEN_TIMEOUT_SECONDS', '800')),
-            'llm_timeout_seconds': int(os.environ.get('ARC_LLM_TIMEOUT_SECONDS', '800')),
+            'qwen_timeout_seconds': int(os.environ.get('ARC_QWEN_TIMEOUT_SECONDS', '700')),
+            'llm_timeout_seconds': int(os.environ.get('ARC_LLM_TIMEOUT_SECONDS', '700')),
             'action_selection_timeout_s': 5000.0,
             'major_cycle_wall_clock_budget_seconds': 5000,
             'total_game_wall_clock_limit_seconds': 5000,
             'max_level_attempts': int(os.environ.get('LCLD_MAX_LEVEL_ATTEMPTS', '4')),
+            'max_actions_per_game': int(os.environ.get('LCLD_MAX_ACTIONS_PER_GAME', '500')),
             'max_actions_per_level': int(os.environ.get('LCLD_MAX_ACTIONS_PER_LEVEL', '500')),
+            'max_game_over_resets_per_game': 40,
+            'max_game_over_resets_per_level': 40,
         })
         return config
 

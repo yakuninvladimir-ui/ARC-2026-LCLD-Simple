@@ -423,13 +423,40 @@ class QwenClient:
         choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
         message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
         response_content = str(message.get("content") or "")
+        finish_reason = choice.get("finish_reason")
+        
+        # Retry vllm call if thinking consumed all tokens (finish_reason == 'length')
+        # or if content is empty. Retry with reduced thinking budget.
+        extracted = None
+        retry_needed = (
+            config.qwen_enable_thinking
+            and finish_reason == "length"
+            and not response_content.strip()
+        )
+        if retry_needed:
+            # Retry once with thinking disabled to salvage JSON output
+            retry_payload = dict(payload)
+            retry_payload["chat_template_kwargs"] = {"enable_thinking": False}
+            retry_body = json.dumps(retry_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            retry_request = urllib_request.Request(endpoint, data=retry_body, headers=headers, method="POST")
+            try:
+                with urllib_request.urlopen(retry_request, timeout=max(1, int(config.qwen_timeout_seconds))) as retry_response:
+                    retry_raw = retry_response.read().decode("utf-8", errors="replace")
+                retry_data = json.loads(retry_raw)
+                retry_choices = retry_data.get("choices")
+                retry_choice = retry_choices[0] if isinstance(retry_choices, list) and retry_choices else {}
+                retry_message = retry_choice.get("message") if isinstance(retry_choice.get("message"), dict) else {}
+                response_content = str(retry_message.get("content") or "")
+            except Exception:
+                pass  # Fall through to original extraction attempt
+        
         extracted = _extract_json(response_content, role=role)
         usage = response_object.get("usage") if isinstance(response_object.get("usage"), dict) else {}
         runtime_metadata = {
             "backend": "vllm",
             "endpoint": endpoint,
             "model": model,
-            "finish_reason": choice.get("finish_reason"),
+            "finish_reason": finish_reason,
             "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),

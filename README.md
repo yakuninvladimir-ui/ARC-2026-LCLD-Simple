@@ -1,6 +1,6 @@
 # ARC-2026 LCLD Simple
 
-> A research repository for the ARC Prize 2026 / ARC-AGI-3 interactive competition containing multiple generations of the LCLD agent architecture, reproducible notebook builders, competition wrappers, engineering specifications, and regression tests.
+> A research repository for the ARC Prize 2026 / ARC-AGI-3 interactive competition containing the V9 generation of the LCLD agent architecture, reproducible notebook builders, competition wrappers, engineering specifications, and regression tests.
 
 ---
 
@@ -8,16 +8,13 @@
 
 **ARC-2026 LCLD Simple** is the primary development repository for the LCLD family of ARC-AGI-3 interactive agents.
 
-Unlike repositories that expose only the latest implementation, this project intentionally preserves multiple architectural generations. Each version represents a distinct design point, allowing ideas to evolve without losing reproducibility or historical context.
-
-At the time of this snapshot the repository contains two maintained implementations:
+At the time of this snapshot the repository contains the V9 implementation:
 
 | Version | Architecture | Status |
 |----------|--------------|--------|
-| **V8.3** | Compact Verified Hypothesis Agent | Stable |
 | **V9.0** | Reverse-Semantic Trajectory Agent | Current research generation |
 
-Both implementations share the same overall competition philosophy:
+The implementation follows the same overall competition philosophy:
 
 - deterministic execution outside model inference;
 - official-transition driven reasoning;
@@ -77,9 +74,7 @@ Notebook generation, packaging and validation are part of the repository rather 
 
 ## Architecture evolution
 
-Older generations are preserved because architectural evolution is itself valuable documentation.
-
-Many ideas introduced in V8 remain useful references even after the implementation moved to V9.
+V9 represents the current generation with complete semantic trajectories rather than isolated local hypotheses. Many ideas introduced in V8 remain useful references for understanding the architectural evolution.
 
 ---
 
@@ -104,43 +99,6 @@ Tests ensure that implementation and specifications remain aligned.
 
 # Implemented Architectures
 
-## Version 8.3
-
-**ARC-AGI-3 Compact Verified Hypothesis Agent**
-
-V8.3 represents the final compact hypothesis-driven architecture before the transition to trajectory-based semantic planning.
-
-Core characteristics include:
-
-- deterministic ARGALite perception;
-- persistent object tracking;
-- stable relation graph;
-- grounded hypothesis bank;
-- fixed verification contracts;
-- bounded Qwen proposals;
-- official-transition verification;
-- replayable execution loop.
-
-The architecture intentionally avoids:
-
-- unrestricted symbolic planners;
-- general-purpose DSL compilation;
-- autonomous action execution by the language model;
-- forward simulation.
-
-Instead, every proposed hypothesis must be grounded by deterministic verification before it can become accepted knowledge.
-
-Documentation:
-
-```
-ARCHITECTURAL_SPECIFICATION_V8_3.md
-ENGINEERING_SPECIFICATION_V8_3.md
-CHANGELOG_V8_3.md
-VALIDATION_V8_3.txt
-```
-
----
-
 ## Version 9
 
 **ARC-AGI-3 Reverse-Semantic Trajectory Agent**
@@ -159,7 +117,7 @@ Major additions include:
 - semantic invariant extraction;
 - trajectory comparison across level resets.
 
-Although considerably more sophisticated than V8, the architecture preserves the same fundamental authority hierarchy:
+Although considerably more sophisticated than previous generations, the architecture preserves the same fundamental authority hierarchy:
 
 ```
 official observation
@@ -188,7 +146,7 @@ ENGINEERING_SPECIFICATION_V9.md
 
 # Architecture Evolution
 
-The repository documents the evolution of the LCLD agent family.
+The repository documents the evolution of the LCLD agent family leading to V9.
 
 ```
 V6.x
@@ -212,7 +170,7 @@ V9
   └── trajectory verification
 ```
 
-Each generation remains available as an implementation reference.
+V9 represents the current implementation.
 
 ---
 
@@ -265,14 +223,6 @@ Every executed action passes through this pipeline.
 
 ```
 .
-├── v8_agent/
-│   ├── runtime implementation
-│   ├── verification
-│   ├── memory
-│   ├── policy
-│   ├── Qwen integration
-│   └── notebook runtime
-│
 ├── v9_agent/
 │   ├── reverse semantics
 │   ├── trajectory verification
@@ -294,13 +244,10 @@ Every executed action passes through this pipeline.
 │   ├── regression tests
 │   └── notebook validation
 │
-├── build_notebook.py
 ├── build_notebook_v9.py
 │
-├── ARCHITECTURAL_SPECIFICATION_*.md
-├── ENGINEERING_SPECIFICATION_*.md
-├── CHANGELOG_*.md
-├── VALIDATION_*.txt
+├── ARCHITECTURAL_SPECIFICATION_V9.md
+├── ENGINEERING_SPECIFICATION_V9.md
 └── README.md
 ```
 
@@ -310,16 +257,13 @@ Every executed action passes through this pipeline.
 
 ## Runtime packages
 
-The runtime packages contain the complete agent implementations.
+The runtime package contains the complete V9 agent implementation.
 
 ```
-v8_agent/
 v9_agent/
 ```
 
-Each package is independently buildable and contains its own runtime logic.
-
-The two implementations intentionally coexist so that architectural evolution remains transparent.
+The implementation is independently buildable and contains its own runtime logic.
 
 ---
 
@@ -341,8 +285,6 @@ These documents are treated as normative references for development.
 ## Notebook builders
 
 The repository generates Kaggle notebooks directly from source.
-
-Separate builders exist for different generations where required.
 
 The generated notebooks are **derived artifacts** and are intentionally excluded from version control.
 
@@ -476,16 +418,10 @@ competition notebooks.
 Typical workflow:
 
 ```bash
-python build_notebook.py
-```
-
-or
-
-```bash
 python build_notebook_v9.py
 ```
 
-The builders package:
+The builder packages:
 
 - runtime sources;
 - competition wrapper;
@@ -556,7 +492,7 @@ Only real ARC gateway execution can validate competition behaviour.
 
 The repository treats specifications as first-class development artifacts.
 
-Each maintained architecture contains two complementary documents.
+V9 contains two complementary documents:
 
 ## Architectural Specification
 
@@ -719,15 +655,9 @@ Primary documents include:
 ```text
 README.md
 
-ARCHITECTURAL_SPECIFICATION_*.md
+ARCHITECTURAL_SPECIFICATION_V9.md
 
-ENGINEERING_SPECIFICATION_*.md
-
-CHANGELOG_*.md
-
-VALIDATION_*.txt
-
-COMPETITION_WRAPPER_AUDIT_*.md
+ENGINEERING_SPECIFICATION_V9.md
 ```
 
 Architectural documents explain *why* the system works.
@@ -743,7 +673,6 @@ The project follows several conventions.
 - Specifications are treated as normative.
 - Runtime behaviour should remain deterministic.
 - Generated artifacts are not committed.
-- Historical architecture versions remain available.
 - Compatibility layers are explicitly documented.
 - Public APIs should remain stable whenever practical.
 

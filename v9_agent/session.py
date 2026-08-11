@@ -498,6 +498,13 @@ class GameSession:
         return self._fallback_streak_by_level.get(level_index, 0) + 1 >= self._MAX_FALLBACK_STREAK_BEFORE_ATTEMPT_RESET
 
     def _can_reset_failed_attempt(self, level_index: int) -> bool:
+        # Semantics of max_level_attempts (LCLD_MAX_LEVEL_ATTEMPTS):
+        #   0 = unlimited attempts (legacy behavior, no cap enforced here)
+        #  >0 = maximum number of attempts allowed per level
+        if self.config.max_level_attempts > 0:
+            current_attempt = self._attempt_index_by_level.get(level_index, 0)
+            if current_attempt >= self.config.max_level_attempts:
+                return False
         return (
             self.config.reset_on_game_over
             and self.config.enable_qwen
