@@ -1,0 +1,22 @@
+{
+  "id": "vladimiryakunin/arc-prize-2026-lcld-qwen-v9",
+  "title": "ARC Prize 2026 - LCLD Qwen V9",
+  "code_file": "arc-prize-2026-lcld-qwen-v9.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "machine_shape": "NvidiaRtxPro6000",
+  "keywords": [],
+  "dataset_sources": [
+    "driessmit1/arc3-vllm-h100-wheelhouse-v3",
+    "driessmit1/vrfai-qwen3-6-27b-fp8-hf-snapshot"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [
+    "arc-prize-2026-arc-agi-3"
+  ],
+  "model_sources": []
+}

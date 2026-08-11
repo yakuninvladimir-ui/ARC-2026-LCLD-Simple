@@ -4,39 +4,35 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.py~
+*.py.class
 
 # Dependencies
 .venv/
 venv/
 env/
 .env
-.env.*
 .env.local
+.env.*
 
-# Build artifacts
-build/
-dist/
-*.egg-info/
+# Testing
+.coverage
+coverage/
+htmlcov/
+.pytest_cache/
+.mypy_cache/
 
-# Editors
-.vscode/
-.idea/
-*.swp
-*.swo
+# Jupyter Notebooks
+.ipynb_checkpoints
+*.ipynb_checkpoints
 
 # Logs
 *.log
 
-# Coverage
-.coverage
-coverage/
-htmlcov/
-
-# Temp files
+# Temporary files
 *.tmp
 *.temp
-
-# OS
+*~
 .DS_Store
 Thumbs.db
 ```

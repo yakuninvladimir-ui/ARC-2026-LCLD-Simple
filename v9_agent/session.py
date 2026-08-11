@@ -33,6 +33,50 @@ _ALTERNATIVE_HYPOTHESIS_RESET_SOURCE = "alternative_hypothesis_reset"
 _RESEARCH_ENTRY_RESET_SOURCE = "research_entry_reset"
 
 
+# =============================================================================
+# ORCHESTRATION CONTRACT: act() / observe_action_result() LIFECYCLE
+# =============================================================================
+# The agent session expects a strict call protocol. Violating this contract
+# causes RuntimeError or undefined behavior.
+#
+# 1. INITIAL CALL:
+#    action = session.act(initial_observation)
+#    - initial_observation MUST be a Mapping with game state keys.
+#    - Returns an action dict to submit to the environment.
+#    - Sets internal pending_action state.
+#
+# 2. TRANSITION COMMIT (REQUIRED before next act()):
+#    success = session.observe_action_result(after_observation)
+#    - after_observation MUST be provided if an action is pending.
+#    - Commits the transition, clears pending_action.
+#    - Returns True on success, False if no action was pending.
+#
+# 3. REPEATED CYCLE:
+#    Loop: act(obs) -> submit -> observe_action_result(new_obs)
+#    - Calling act() while pending_action is set triggers compatibility fallback
+#      ONLY if the snapshot has changed; otherwise raises RuntimeError.
+#    - observe_action_result() without pending_action returns False (no-op).
+#
+# 4. TERMINAL STATES:
+#    - Terminal success returns RESET with source="terminal_guard".
+#    - Exhausted attempts may raise LevelRunLimitReached.
+#    - Alternative hypothesis resets use source="alternative_hypothesis_reset".
+#    - Research entry resets use source="research_entry_reset".
+#
+# 5. FALLBACK BEHAVIOR:
+#    - If no executable candidate exists, safe_fallback() is invoked.
+#    - Fallback sources: "memory_aware_fallback", "exhaustion_revisit", "state_reset".
+#    - Excessive fallback streaks trigger attempt reset.
+#
+# EXAMPLE LOOP:
+#   obs = env.reset()
+#   while not done:
+#       action = session.act(obs)
+#       obs = env.step(action)
+#       session.observe_action_result(obs)
+# =============================================================================
+
+
 class LevelRunLimitReached(RuntimeError):
     """Normal orchestration terminal for an exhausted level budget."""
 
@@ -478,7 +522,7 @@ class GameSession:
         )
 
     _MAX_FALLBACK_STREAK_BEFORE_ATTEMPT_RESET = 8
-    _FALLBACK_SOURCES = {"memory_aware_fallback", "exhaustion_revisit"}
+    _FALLBACK_SOURCES = {"memory_aware_fallback", "exhaustion_revisit", "state_reset"}
 
     def _should_reset_instead_of_flail(self, level_index: int, fallback: CandidateAction) -> bool:
         """Dead-attempt detection for the RESET-with-explanation cycle.
