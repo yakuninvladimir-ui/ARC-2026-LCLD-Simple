@@ -738,3 +738,168 @@ def gateway_handshake_or_die():
             last_error = f'{type(exc).__name__}: {exc}'
         time.sleep(5.0)
     raise RuntimeError('Kaggle gateway did not become ready within 700s: ' + last_error)
+
+
+# === PHASE A HEAVY COMBAT SMOKE (диагностика; для финального сабмита выключить) ===
+PHASE_A_HEAVY_SMOKE = True
+HEAVY_SMOKE_WORKERS = VLLM_MAX_NUM_SEQS      # воспроизводим боевой параллелизм
+HEAVY_SMOKE_ROUNDS = 2
+HEAVY_SMOKE_REQ_TIMEOUT = 2400               # верхняя граница на один запрос
+
+
+def _smoke_gpu_info():
+    try:
+        r = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.used,memory.total',
+                            '--format=csv,noheader'], text=True, capture_output=True, timeout=30)
+        return (r.stdout or '').strip()
+    except Exception as exc:
+        return f'nvidia-smi failed: {exc}'
+
+
+def _smoke_build_combat_payload(config, with_schema=True):
+    import random
+    from v9_agent.frame_media import annotated_frame_png, current_frame_png
+    from v9_agent.llm import QwenRole, _allowed_output_schema, _prompt, _vllm_compatible_output_schema
+    rnd = random.Random(20260214)
+    rows = tuple(''.join(rnd.choice('0123456789ABCDEF') for _ in range(30)) for _ in range(30))
+    frame_png = current_frame_png(rows, cell_scale=config.frame_png_cell_scale)
+    annotated = annotated_frame_png(rows, [
+        {'label': f'obj{i}', 'bbox_xyxy': [2 + 5*i, 2 + 4*i, 6 + 5*i, 6 + 4*i]} for i in range(4)
+    ], cell_scale=config.frame_png_cell_scale)
+    for fp in (frame_png, annotated):
+        fp['available_to_configured_backend'] = True
+    object_ids = [f'o{i:02d}' for i in range(12)]
+    relation_ids = [f'r{i:02d}' for i in range(8)]
+    candidate_ids = [f'c{i:02d}' for i in range(20)]
+    action_ids = [f'ACTION{i}' for i in range(1, 7)]
+    packet = {
+        'schema_version': 'v8.8.layered_observation',
+        'state': {'game_id': 'smoke', 'level_index': 0, 'step_index': 42, 'state_name': 'IN_PROGRESS'},
+        'current_frame_png': frame_png,
+        'annotated_frame_png': annotated,
+        'object_layer': {
+            'objects': [{'id': oid, 'bbox_xyxy': [0, 0, 4, 4], 'centroid_xy': [2, 2], 'area': 9} for oid in object_ids],
+            'relations': [{'id': rid, 'type': 'near', 'object_ids': object_ids[:2]} for rid in relation_ids],
+        },
+        'action_space': {
+            'actions': [{'id': aid, 'kind': 'simple'} for aid in action_ids],
+            'current_available_action_ids': action_ids,
+            'coordinate_candidates': [{'id': cid, 'location_xy': [i % 30, i]} for i, cid in enumerate(candidate_ids)],
+        },
+        'action_diffs': [],
+        'memory': {},
+        'execution_constraints': {
+            'max_plan_steps': int(getattr(config, 'max_qwen_trajectory_steps', 50)),
+            'allowed_action_ids': action_ids,
+            'allowed_object_ids': object_ids,
+            'allowed_relation_ids': relation_ids,
+            'allowed_coordinate_candidate_ids': candidate_ids,
+        },
+    }
+    prompt = _prompt(QwenRole.PRIMARY, packet, config)
+    images = [frame_png['data_base64'], annotated['data_base64']]
+    content = [{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + img}} for img in images]
+    content.append({'type': 'text', 'text': prompt})
+    payload = {
+        'model': QWEN_MODEL_NAME,
+        'messages': [{'role': 'user', 'content': content}],
+        'stream': False,
+        'max_tokens': QWEN_MAX_OUTPUT_TOKENS,
+        'temperature': 0.4, 'top_k': 30, 'top_p': 0.95, 'min_p': 0.05,
+        'presence_penalty': 0.05, 'repetition_penalty': 1.05, 'seed': 0,
+        'chat_template_kwargs': {'enable_thinking': QWEN_THINKING_ENABLED},
+    }
+    if with_schema:
+        schema = _vllm_compatible_output_schema(_allowed_output_schema(QwenRole.PRIMARY, packet))
+        payload['response_format'] = {'type': 'json_schema',
+                                      'json_schema': {'name': 'lcld_heavy_smoke', 'schema': schema, 'strict': True}}
+    print('[HEAVY-SMOKE] payload built: prompt_chars=', len(prompt),
+          'image_b64_chars=', sum(len(i) for i in images), flush=True)
+    return payload
+
+
+def _smoke_send(label, payload, timeout):
+    rec = {'label': label, 'utc': _utc_now()}
+    started = time.monotonic()
+    request = Request(VLLM_BASE_URL + '/chat/completions',
+                      data=json.dumps(payload).encode('utf-8'),
+                      headers={'Content-Type': 'application/json'})
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            body = response.read().decode('utf-8', errors='replace')
+    except Exception as exc:
+        rec['elapsed'] = round(time.monotonic() - started, 2)
+        rec['error_type'] = type(exc).__name__
+        rec['error'] = str(exc)[:1500]
+        try:
+            rec['error_body'] = exc.read().decode('utf-8', errors='replace')[-1500:]
+        except Exception:
+            pass
+        return rec
+    rec['elapsed'] = round(time.monotonic() - started, 2)
+    try:
+        data = json.loads(body)
+        choice = (data.get('choices') or [{}])[0]
+        message = choice.get('message') or {}
+        content = str(message.get('content') or '')
+        reasoning = str(message.get('reasoning_content') or '')
+        usage = data.get('usage') or {}
+        try:
+            json.loads(content); parsed = True
+        except Exception:
+            parsed = False
+        rec.update({
+            'finish_reason': choice.get('finish_reason'),
+            'prompt_tokens': usage.get('prompt_tokens'),
+            'completion_tokens': usage.get('completion_tokens'),
+            'reasoning_chars': len(reasoning),
+            'content_chars': len(content),
+            'content_is_json': parsed,
+            'content_tail': content[-300:],
+        })
+    except Exception as exc:
+        rec['response_parse_error'] = f'{type(exc).__name__}: {exc}'[:500]
+        rec['body_tail'] = body[-800:]
+    return rec
+
+
+def _smoke_worker(worker_id, payload, rounds):
+    out = []
+    for rnd in range(rounds):
+        rec = _smoke_send(f'w{worker_id}_combat_r{rnd}', payload, HEAVY_SMOKE_REQ_TIMEOUT)
+        print('[HEAVY-SMOKE]', json.dumps(rec, sort_keys=True, ensure_ascii=False), flush=True)
+        out.append(rec)
+    return out
+
+
+def run_phase_a_heavy_smoke():
+    from concurrent.futures import ThreadPoolExecutor
+    from v9_agent.config import config_from_mapping
+    config = config_from_mapping({})
+    print('[HEAVY-SMOKE] GPU before:', _smoke_gpu_info(), flush=True)
+
+    # --- baseline 1: чистый decode без thinking ---
+    base = {'model': QWEN_MODEL_NAME, 'stream': False, 'max_tokens': 1024, 'temperature': 0.4,
+            'messages': [{'role': 'user', 'content': 'Count from 1 to 400, one number per line.'}],
+            'chat_template_kwargs': {'enable_thinking': False}}
+    print('[HEAVY-SMOKE]', json.dumps(_smoke_send('baseline_no_thinking', base, 600), sort_keys=True), flush=True)
+
+    # --- baseline 2: thinking без vision/schema ---
+    think = dict(base); think['max_tokens'] = 8192
+    think['messages'] = [{'role': 'user', 'content': 'Think step by step about the 3n+1 problem for n=27, then answer.'}]
+    think['chat_template_kwargs'] = {'enable_thinking': True}
+    print('[HEAVY-SMOKE]', json.dumps(_smoke_send('baseline_thinking', think, 1200), sort_keys=True), flush=True)
+
+    # --- боевой запрос без schema (изоляция overhead XGrammar) ---
+    combat_no_schema = _smoke_build_combat_payload(config, with_schema=False)
+    print('[HEAVY-SMOKE]', json.dumps(_smoke_send('combat_no_schema_single', combat_no_schema, HEAVY_SMOKE_REQ_TIMEOUT), sort_keys=True), flush=True)
+
+    # --- полный боевой запрос, параллелизм = боевому ---
+    combat = _smoke_build_combat_payload(config, with_schema=True)
+    with ThreadPoolExecutor(max_workers=HEAVY_SMOKE_WORKERS, thread_name_prefix='smoke') as ex:
+        futures = [ex.submit(_smoke_worker, i, combat, HEAVY_SMOKE_ROUNDS) for i in range(HEAVY_SMOKE_WORKERS)]
+        for f in futures:
+            f.result()
+    print('[HEAVY-SMOKE] GPU after:', _smoke_gpu_info(), flush=True)
+    print('[HEAVY-SMOKE] vllm log tail:', flush=True)
+    print(_vllm_log_tail(30000), flush=True)

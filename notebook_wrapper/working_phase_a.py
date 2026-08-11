@@ -37,6 +37,21 @@ if not IS_PHASE_B_CANDIDATE:
             encoding='utf-8',
         )
 
+        # === HEAVY SMOKE TEST (перед статическим префлайтом) ===
+        if PHASE_A_HEAVY_SMOKE:
+            try:
+                setup_runtime(phase='phase_a_heavy_combat_smoke', heavy_diagnostics=False,
+                              qwen_probe=True, full_import_sweep=False,
+                              start_model_server=True, validate_accelerator=True)
+                run_phase_a_heavy_smoke()
+            except Exception as exc:
+                # Smoke не должен ронять dry-run:dummy parquet обязан появиться в любом случае
+                print('LCLD_HEAVY_SMOKE_FATAL=' + json.dumps(
+                    {'error_type': type(exc).__name__, 'error': str(exc)[:4000]}, ensure_ascii=False), flush=True)
+                print(_vllm_log_tail(30000), flush=True)
+            finally:
+                stop_vllm_server()
+
         submission = pd.DataFrame(
             data=[['1_0', '1', True, 1]],
             columns=['row_id', 'game_id', 'end_of_game', 'score'],
