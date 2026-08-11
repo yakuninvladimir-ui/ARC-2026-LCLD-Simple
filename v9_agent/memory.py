@@ -674,6 +674,9 @@ class GameMemory:
                 key=lambda item: (-item[0], item[1]),
             )
             if ranked and ranked[0][0] >= 70.0:
+                # Check that the best candidate hasn't already been assigned
+                if ranked[0][1] in used_current_ids:
+                    continue
                 object_map[object_id] = ranked[0][1]
                 used_current_ids.add(ranked[0][1])
 
