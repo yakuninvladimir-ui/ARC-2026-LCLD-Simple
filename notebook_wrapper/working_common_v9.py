@@ -744,7 +744,7 @@ def gateway_handshake_or_die():
 PHASE_A_HEAVY_SMOKE = True
 HEAVY_SMOKE_WORKERS = VLLM_MAX_NUM_SEQS      # воспроизводим боевой параллелизм
 HEAVY_SMOKE_ROUNDS = 2
-HEAVY_SMOKE_REQ_TIMEOUT = 2400               # верхняя граница на один запрос
+HEAVY_SMOKE_REQ_TIMEOUT = 600                # верхняя граница на один запрос (снижено с 2400)
 
 
 def _smoke_gpu_info():
@@ -772,6 +772,14 @@ def _smoke_build_combat_payload(config, with_schema=True):
     relation_ids = [f'r{i:02d}' for i in range(8)]
     candidate_ids = [f'c{i:02d}' for i in range(20)]
     action_ids = [f'ACTION{i}' for i in range(1, 7)]
+    # Минимальная память с action_effects, чтобы _allowed_action_ids вернул непустой список
+    memory = {
+        'action_effects': [
+            {'action_id': aid, 'effect_summary': f'smoke effect for {aid}', 'step_index': 40 + i}
+            for i, aid in enumerate(action_ids)
+        ],
+        'action_surface_memory_records': [],
+    }
     packet = {
         'schema_version': 'v8.8.layered_observation',
         'state': {'game_id': 'smoke', 'level_index': 0, 'step_index': 42, 'state_name': 'IN_PROGRESS'},
@@ -787,7 +795,7 @@ def _smoke_build_combat_payload(config, with_schema=True):
             'coordinate_candidates': [{'id': cid, 'location_xy': [i % 30, i]} for i, cid in enumerate(candidate_ids)],
         },
         'action_diffs': [],
-        'memory': {},
+        'memory': memory,
         'execution_constraints': {
             'max_plan_steps': int(getattr(config, 'max_qwen_trajectory_steps', 50)),
             'allowed_action_ids': action_ids,
