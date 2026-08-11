@@ -673,8 +673,12 @@ def _score_delta(before: ARGALiteSnapshot, after: ARGALiteSnapshot) -> float | N
 def _attribution(action: CandidateAction, changed_count: int, near_target: int, far_target: int, target_in_changed_bbox: bool, score_delta: float | None, terminal_delta: bool, game_over_delta: bool, config: V8Config) -> Attribution:
     if changed_count == 0 and not score_delta and not terminal_delta and not game_over_delta:
         return Attribution.NO_VISIBLE_CHANGE
+    # Fix #7: Require actual changes for ACTION_LINKED attribution when no terminal/game-over delta
     if terminal_delta or game_over_delta:
         return Attribution.ACTION_LINKED
+    if changed_count == 0:
+        # No visible changes and no terminal/game-over delta: cannot attribute to action
+        return Attribution.NO_VISIBLE_CHANGE
     if action.x is None or action.y is None:
         return Attribution.ACTION_LINKED
     if target_in_changed_bbox:

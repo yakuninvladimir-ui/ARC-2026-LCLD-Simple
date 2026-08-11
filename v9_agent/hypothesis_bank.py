@@ -144,8 +144,8 @@ class HypothesisBank:
         return rebound_bindings
 
     def attempt_feedback(self, limit: int = 12) -> dict[str, Any]:
-        # Ensure limit is at least 1 to avoid returning the entire list when limit <= 0.
-        limit = max(1, int(limit))
+        # Allow limit=0 to return empty results; negative limits are coerced to 0.
+        limit = max(0, int(limit))
         hypotheses = []
         seen: set[str] = set()
         for item in (
@@ -177,10 +177,10 @@ class HypothesisBank:
                 ),
             })
         return {
-            "hypotheses": hypotheses[-limit:],
+            "hypotheses": hypotheses[-limit:] if limit > 0 else [],
             "rejections": [
                 _compact_attempt_rejection(item)
-                for item in self.invalid_rejections[-limit:]
+                for item in self.invalid_rejections[-limit:] if limit > 0
                 if isinstance(item, dict)
             ],
         }
@@ -492,6 +492,13 @@ class HypothesisBank:
                         or (action_id not in coordinate_action_ids and candidate_id is not None)
                     )
                 ), None)
+                # Fix #8: Also reject if action_run_steps contains None for coordinate actions
+                if bad_coordinate_binding is None and action_run_steps:
+                    bad_coordinate_binding = next((
+                        (action_id, candidate_id)
+                        for action_id, candidate_id in action_run_steps
+                        if action_id in coordinate_action_ids and candidate_id is None
+                    ), None)
                 if bad_coordinate_binding is not None:
                     action_id, candidate_id = bad_coordinate_binding
                     self.invalid_rejections.append({
@@ -617,7 +624,8 @@ class HypothesisBank:
                     if alias_to_internal is None:
                         alias_to_internal = dict(build_model_aliases(snapshot, config).get("object_aliases", {}))
                     target_ids = _v87_changed_object_internal_ids(action_id, packet, alias_to_internal, valid_objects)
-                coordinate_candidate_id = action_run_steps[action_index][1] if action_run_steps else None
+                # Fix #1: Protect against IndexError when action_run_steps is shorter than actions
+                coordinate_candidate_id = action_run_steps[action_index][1] if action_run_steps and action_index < len(action_run_steps) else None
                 plan.append(TestStep(
                     kind="verified_effect_trajectory_step",
                     action_id=action_id,

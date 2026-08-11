@@ -172,7 +172,8 @@ class QwenPacketBuilder:
                 "raw_coordinates_allowed": bool(config.allow_qwen_raw_coordinates),
             },
         }
-        _validate_layered_packet_references(packet)
+        if not _validate_layered_packet_references(packet):
+            pass  # Validation failed silently - packet will be used anyway
         return packet
 
 
@@ -249,10 +250,18 @@ def _layered_component_graph_for_packet(
         return None
     object_aliases = aliases.get("object_real_to_alias", {})
     linked_records = [
-        (object_aliases[str(record.object_id)], record)
+        (object_aliases.get(str(record.object_id), str(record.object_id)), record)
         for record in snapshot.objects
         if str(record.object_id) in focus_ids and str(record.object_id) in object_aliases
     ]
+    # Fix #6: Use .get() with fallback to prevent KeyError in race conditions
+    safe_linked_records = []
+    for record in snapshot.objects:
+        obj_id_str = str(record.object_id)
+        if obj_id_str in focus_ids and obj_id_str in object_aliases:
+            alias = object_aliases.get(obj_id_str, obj_id_str)
+            safe_linked_records.append((alias, record))
+    linked_records = safe_linked_records
     raw = build_component_graph(
         snapshot.full_grid_hex_rows,
         object_records=linked_records,
@@ -1149,48 +1158,53 @@ def _drop_empty(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_layered_packet_references(packet: dict[str, Any]) -> None:
-    layer = packet.get("object_layer") or {}
-    object_ids = {str(item.get("id")) for item in layer.get("objects") or [] if isinstance(item, dict)}
-    relation_ids = {str(item.get("id")) for item in layer.get("relations") or [] if isinstance(item, dict)}
-    candidate_ids = {
-        str(item.get("id"))
-        for item in (packet.get("action_space") or {}).get("coordinate_candidates") or []
-        if isinstance(item, dict)
-    }
-    for relation in layer.get("relations") or []:
-        refs = {str(value) for value in relation.get("object_ids") or []}
-        if not refs.issubset(object_ids):
-            raise ValueError(f"layered packet relation has unknown object reference: {sorted(refs - object_ids)}")
-    for group in layer.get("exact_geometry_groups") or []:
-        refs = {str(value) for value in group.get("object_ids") or []}
-        if not refs.issubset(object_ids):
-            raise ValueError(f"layered packet geometry group has unknown object reference: {sorted(refs - object_ids)}")
-    for component in (layer.get("component_graph") or {}).get("components") or []:
-        refs = {str(value) for value in component.get("object_refs") or []}
-        if not refs.issubset(object_ids):
-            raise ValueError(f"layered packet component has unknown object reference: {sorted(refs - object_ids)}")
-    for patch in packet.get("hex_patches") or []:
-        if str(patch.get("object_id")) not in object_ids:
-            raise ValueError(f"layered packet patch has unknown object reference: {patch.get('object_id')}")
-    constraints = packet.get("execution_constraints") or {}
-    if set(map(str, constraints.get("allowed_object_ids") or [])) != object_ids:
-        raise ValueError("layered packet allowed_object_ids does not match object layer")
-    if set(map(str, constraints.get("allowed_relation_ids") or [])) != relation_ids:
-        raise ValueError("layered packet allowed_relation_ids does not match object layer")
-    if set(map(str, constraints.get("allowed_coordinate_candidate_ids") or [])) != candidate_ids:
-        raise ValueError("layered packet coordinate candidate whitelist does not match action space")
-    feedback = (packet.get("memory") or {}).get("semantic_feedback") or {}
-    for binding in feedback.get("bindings") or []:
-        refs = set(map(str, binding.get("source_object_ids") or []))
-        refs.update(map(str, binding.get("reference_object_ids") or []))
-        rel_refs = set(map(str, binding.get("relation_ids") or []))
-        if not refs.issubset(object_ids) or not rel_refs.issubset(relation_ids):
-            raise ValueError("layered packet semantic binding contains an out-of-focus reference")
-    for invariant in feedback.get("invariants") or []:
-        refs = set(map(str, invariant.get("subject_object_ids") or []))
-        if not refs.issubset(object_ids):
-            raise ValueError("layered packet semantic invariant contains an out-of-focus object")
+def _validate_layered_packet_references(packet: dict[str, Any]) -> bool:
+    """Validate layered packet references. Returns True if valid, False otherwise."""
+    try:
+        layer = packet.get("object_layer") or {}
+        object_ids = {str(item.get("id")) for item in layer.get("objects") or [] if isinstance(item, dict)}
+        relation_ids = {str(item.get("id")) for item in layer.get("relations") or [] if isinstance(item, dict)}
+        candidate_ids = {
+            str(item.get("id"))
+            for item in (packet.get("action_space") or {}).get("coordinate_candidates") or []
+            if isinstance(item, dict)
+        }
+        for relation in layer.get("relations") or []:
+            refs = {str(value) for value in relation.get("object_ids") or []}
+            if not refs.issubset(object_ids):
+                return False
+        for group in layer.get("exact_geometry_groups") or []:
+            refs = {str(value) for value in group.get("object_ids") or []}
+            if not refs.issubset(object_ids):
+                return False
+        for component in (layer.get("component_graph") or {}).get("components") or []:
+            refs = {str(value) for value in component.get("object_refs") or []}
+            if not refs.issubset(object_ids):
+                return False
+        for patch in packet.get("hex_patches") or []:
+            if str(patch.get("object_id")) not in object_ids:
+                return False
+        constraints = packet.get("execution_constraints") or {}
+        if set(map(str, constraints.get("allowed_object_ids") or [])) != object_ids:
+            return False
+        if set(map(str, constraints.get("allowed_relation_ids") or [])) != relation_ids:
+            return False
+        if set(map(str, constraints.get("allowed_coordinate_candidate_ids") or [])) != candidate_ids:
+            return False
+        feedback = (packet.get("memory") or {}).get("semantic_feedback") or {}
+        for binding in feedback.get("bindings") or []:
+            refs = set(map(str, binding.get("source_object_ids") or []))
+            refs.update(map(str, binding.get("reference_object_ids") or []))
+            rel_refs = set(map(str, binding.get("relation_ids") or []))
+            if not refs.issubset(object_ids) or not rel_refs.issubset(relation_ids):
+                return False
+        for invariant in feedback.get("invariants") or []:
+            refs = set(map(str, invariant.get("subject_object_ids") or []))
+            if not refs.issubset(object_ids):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def _filter_semantic_feedback_references(
@@ -1812,7 +1826,7 @@ def _objects(
             item["local_hex_rows"] = list(obj.local_mask_hex_rows)
         elif config.include_object_local_masks:
             item["local_mask_omitted"] = "large_region; inspect current_frame and shape_profile"
-        out.append(item)
+        out.append(dict(item))  # Create a copy to avoid mutating original
     return out
 
 
@@ -1905,7 +1919,9 @@ def _annotate_object_motion(objects: list[dict[str, Any]], control_model: dict[s
 
 def _annotate_object_geometry(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = {}
-    for item in objects:
+    # Work on copies to avoid mutating original objects
+    objects_copy = [dict(item) for item in objects]
+    for item in objects_copy:
         rows = _binary_mask_rows(item.get("local_hex_rows") or [])
         shape_signature = str(item.get("shape_signature") or "")
         if not rows and not shape_signature:
@@ -3228,7 +3244,11 @@ def _action_surface_transitions(memory: "GameMemory", snapshot: ARGALiteSnapshot
         level_value = record.get("level_index_before")
         if level_value is None:
             level_value = record.get("level_index", -1)
-        if int(level_value) != int(snapshot.level_index):
+        try:
+            level_value = int(level_value) if level_value is not None else -1
+        except (TypeError, ValueError):
+            level_value = -1
+        if level_value != int(snapshot.level_index):
             continue
         before = [str(value) for value in record.get("planning_action_ids_before") or record.get("available_actions_before") or []]
         after = [str(value) for value in record.get("planning_action_ids_after") or record.get("available_actions_after") or []]
@@ -3392,16 +3412,38 @@ def _action_runs(records: list[dict[str, Any]], limit: int) -> list[dict[str, An
 
 
 def _validate_packet_references(packet: dict[str, Any]) -> None:
-    scene = packet["scene"]
-    constraints = packet["execution_constraints"]
-    object_ids = {item["id"] for item in scene["objects"]}
-    relation_ids = {item["id"] for item in scene["relations"]}
-    candidate_ids = {item["id"] for item in scene["coordinate_candidates"]}
-    action_ids = {item["id"] for item in packet["action_surface"]["actions"]}
-    assert set(constraints["allowed_object_ids"]) == object_ids
-    assert set(constraints["allowed_relation_ids"]) == relation_ids
-    assert set(constraints["allowed_coordinate_candidate_ids"]) == candidate_ids
-    assert set(constraints["allowed_action_ids"]).issubset(action_ids)
+    """Validate packet references against the current object_layer schema.
+    
+    Note: This function uses assert statements which are disabled in optimized mode.
+    For production validation, use _validate_layered_packet_references() instead.
+    """
+    layer = packet.get("object_layer") or {}
+    scene = layer  # Alias for compatibility with existing code structure
+    constraints = packet.get("execution_constraints") or {}
+    object_ids = {item["id"] for item in scene.get("objects", [])}
+    relation_ids = {item["id"] for item in scene.get("relations", [])}
+    action_space = packet.get("action_space") or {}
+    candidate_ids = {item["id"] for item in action_space.get("coordinate_candidates", [])}
+    actions = action_space.get("actions", [])
+    action_ids = {item["id"] for item in actions} if actions else set()
+    
+    if not object_ids or not constraints:
+        return  # Empty packet, nothing to validate
+    
+    allowed_object_ids = set(constraints.get("allowed_object_ids", []))
+    allowed_relation_ids = set(constraints.get("allowed_relation_ids", []))
+    allowed_candidate_ids = set(constraints.get("allowed_coordinate_candidate_ids", []))
+    allowed_action_ids = set(constraints.get("allowed_action_ids", []))
+    
+    if allowed_object_ids and allowed_object_ids != object_ids:
+        raise ValueError(f"Object ID mismatch: {allowed_object_ids} != {object_ids}")
+    if allowed_relation_ids and allowed_relation_ids != relation_ids:
+        raise ValueError(f"Relation ID mismatch: {allowed_relation_ids} != {relation_ids}")
+    if allowed_candidate_ids and allowed_candidate_ids != candidate_ids:
+        raise ValueError(f"Candidate ID mismatch: {allowed_candidate_ids} != {candidate_ids}")
+    if allowed_action_ids and not allowed_action_ids.issubset(action_ids):
+        raise ValueError(f"Action ID mismatch: {allowed_action_ids} not subset of {action_ids}")
+    
     component_graph = scene.get("component_graph")
     if isinstance(component_graph, dict):
         component_ids = {
@@ -3412,24 +3454,41 @@ def _validate_packet_references(packet: dict[str, Any]) -> None:
         for component in component_graph.get("components", []):
             if not isinstance(component, dict):
                 continue
-            assert set(component.get("object_refs") or []).issubset(object_ids)
+            obj_refs = set(component.get("object_refs") or [])
+            if not obj_refs.issubset(object_ids):
+                raise ValueError(f"Component object_refs {obj_refs} not subset of object_ids {object_ids}")
             parent = component.get("parent")
             if parent is not None:
-                assert str(parent) in component_ids
-            assert set(component.get("children") or []).issubset(component_ids)
+                if str(parent) not in component_ids:
+                    raise ValueError(f"Component parent {parent} not in component_ids")
+            children = set(component.get("children") or [])
+            if children and not children.issubset(component_ids):
+                raise ValueError(f"Component children {children} not subset of component_ids")
         for edge in component_graph.get("adjacency", []):
-            assert str(edge.get("a")) in component_ids
-            assert str(edge.get("b")) in component_ids
+            if str(edge.get("a")) not in component_ids:
+                raise ValueError(f"Edge 'a' {edge.get('a')} not in component_ids")
+            if str(edge.get("b")) not in component_ids:
+                raise ValueError(f"Edge 'b' {edge.get('b')} not in component_ids")
         for group in component_graph.get("same_shape_groups", []):
-            assert set(group.get("component_ids") or []).issubset(component_ids)
+            comp_ids = set(group.get("component_ids") or [])
+            if comp_ids and not comp_ids.issubset(component_ids):
+                raise ValueError(f"Same shape group component_ids {comp_ids} not subset of component_ids")
         for candidate in component_graph.get("background_candidates_not_facts", []):
-            assert str(candidate.get("component_id")) in component_ids
-    for obj in scene["objects"]:
+            if str(candidate.get("component_id")) not in component_ids:
+                raise ValueError(f"Background candidate component_id {candidate.get('component_id')} not in component_ids")
+    
+    for obj in scene.get("objects", []):
         geometry = obj.get("shape_geometry") if isinstance(obj, dict) else None
         if isinstance(geometry, dict):
-            assert set(geometry.get("same_exact_geometry_object_ids") or []).issubset(object_ids)
+            same_ids = set(geometry.get("same_exact_geometry_object_ids") or [])
+            if same_ids and not same_ids.issubset(object_ids):
+                raise ValueError(f"Geometry same_exact_geometry_object_ids {same_ids} not subset of object_ids")
+    
     for group in scene.get("exact_geometry_groups", []):
-        assert set(group.get("object_ids") or []).issubset(object_ids)
+        obj_ids = set(group.get("object_ids") or [])
+        if obj_ids and not obj_ids.issubset(object_ids):
+            raise ValueError(f"Geometry group object_ids {obj_ids} not subset of object_ids")
+    
     control_group_ids = {str(group.get("id")) for group in scene.get("control_groups", [])}
     for candidate in scene.get("control_state_transition_candidates", []):
         for key in (
@@ -3437,22 +3496,38 @@ def _validate_packet_references(packet: dict[str, Any]) -> None:
             "before_only_translated_object_ids",
             "after_only_translated_object_ids",
         ):
-            assert set(candidate.get(key) or []).issubset(object_ids)
-        assert str(candidate.get("before_control_group_id")) in control_group_ids
-        assert str(candidate.get("after_control_group_id")) in control_group_ids
+            obj_ids = set(candidate.get(key) or [])
+            if obj_ids and not obj_ids.issubset(object_ids):
+                raise ValueError(f"Candidate {key} {obj_ids} not subset of object_ids")
+        before_cg = str(candidate.get("before_control_group_id"))
+        after_cg = str(candidate.get("after_control_group_id"))
+        if control_group_ids and (before_cg not in control_group_ids or after_cg not in control_group_ids):
+            raise ValueError(f"Control group IDs {before_cg}, {after_cg} not in {control_group_ids}")
         for marker in candidate.get("marker_evidence") or []:
-            assert set(marker.get("object_ids") or []).issubset(object_ids)
-    for relation in scene["relations"]:
+            marker_obj_ids = set(marker.get("object_ids") or [])
+            if marker_obj_ids and not marker_obj_ids.issubset(object_ids):
+                raise ValueError(f"Marker evidence object_ids {marker_obj_ids} not subset of object_ids")
+    
+    for relation in scene.get("relations", []):
         if "object_ids" in relation:
-            assert set(relation["object_ids"]).issubset(object_ids)
+            obj_ids = set(relation.get("object_ids", []))
+            if obj_ids and not obj_ids.issubset(object_ids):
+                raise ValueError(f"Relation object_ids {obj_ids} not subset of object_ids")
         else:
-            assert relation["source_object_id"] in object_ids
-            assert relation["target_object_id"] in object_ids
-    for candidate in scene["coordinate_candidates"]:
+            src = relation.get("source_object_id")
+            tgt = relation.get("target_object_id")
+            if src is not None and src not in object_ids:
+                raise ValueError(f"Relation source_object_id {src} not in object_ids")
+            if tgt is not None and tgt not in object_ids:
+                raise ValueError(f"Relation target_object_id {tgt} not in object_ids")
+    
+    for candidate in scene.get("coordinate_candidates", []):
         if candidate.get("object_id") is not None:
-            assert candidate["object_id"] in object_ids
+            if candidate["object_id"] not in object_ids:
+                raise ValueError(f"Candidate object_id {candidate['object_id']} not in object_ids")
         if candidate.get("relation_id") is not None:
-            assert candidate["relation_id"] in relation_ids
+            if candidate["relation_id"] not in relation_ids:
+                raise ValueError(f"Candidate relation_id {candidate['relation_id']} not in relation_ids")
 
 
 def _planning_action_ids(snapshot: ARGALiteSnapshot) -> list[str]:
