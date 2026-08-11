@@ -1140,9 +1140,19 @@ def _static_output_schema(role: QwenRole) -> dict[str, Any]:
 
 
 def _dynamic_enum_output_schema(role: QwenRole, packet: dict[str, Any] | None = None) -> dict[str, Any]:
-    """V9 frame-specific schema that hard-blocks IDs outside execution_constraints."""
+    """V9 frame-specific schema that hard-blocks IDs outside execution_constraints.
+
+    CRITICAL: If allowed_action_ids is empty, falls back to static schema to avoid
+    generating {"type": "string", "not": {}} which cannot be satisfied by any value
+    and causes XGrammar compilation errors or request hangs.
+    """
     constraints = (packet or {}).get("execution_constraints", {}) if isinstance(packet, dict) else {}
     action_ids = list(dict.fromkeys(str(value) for value in constraints.get("allowed_action_ids", [])))
+    
+    # FALLBACK: Empty allowed_action_ids would produce unsatisfiable schema
+    if not action_ids:
+        return _static_output_schema(role)
+    
     object_ids = list(dict.fromkeys(str(value) for value in constraints.get("allowed_object_ids", [])))
     relation_ids = list(dict.fromkeys(str(value) for value in constraints.get("allowed_relation_ids", [])))
     coordinate_ids = list(
