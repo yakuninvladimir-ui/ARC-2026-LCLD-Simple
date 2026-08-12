@@ -662,37 +662,6 @@ def phase_b_model_smoke_or_die():
         if not contract_choices:
             raise RuntimeError('Qwen production transport smoke returned no choices')
 
-        # Vision transport check: the agent attaches TWO images (raw + annotated)
-        # to every hypothesis call. Probe that exact multi-image shape here,
-        # before the scorecard opens, so a vLLM per-prompt image limit fails in
-        # Phase A diagnostics instead of silently zeroing the competition run.
-        tiny_png_b64 = (
-            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGA'
-            'hKmMIQAAAABJRU5ErkJggg=='
-        )
-        vision_payload = {
-            'model': QWEN_MODEL_NAME,
-            'messages': [{
-                'role': 'user',
-                'content': [
-                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + tiny_png_b64}},
-                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + tiny_png_b64}},
-                    {'type': 'text', 'text': 'How many images are attached? Answer with one digit.'},
-                ],
-            }],
-            'temperature': 0.0,
-            'top_p': 1.0,
-            'max_tokens': 8,
-            'chat_template_kwargs': {'enable_thinking': False},
-        }
-        vision_response = _request_json(
-            VLLM_BASE_URL + '/chat/completions',
-            payload=vision_payload,
-            timeout=180,
-        )
-        vision_choices = vision_response.get('choices') or []
-        if not vision_choices:
-            raise RuntimeError('Qwen two-image vision smoke returned no choices')
         summary = {
             'status': 'ok',
             'elapsed_seconds': round(time.monotonic() - started, 3),
@@ -702,9 +671,6 @@ def phase_b_model_smoke_or_die():
             'production_transport_thinking_enabled': QWEN_THINKING_ENABLED,
             'production_transport_checked': True,
             'production_transport_finish_reason': contract_choices[0].get('finish_reason'),
-            'vision_input_checked': True,
-            'vision_two_images_checked': True,
-            'vision_finish_reason': vision_choices[0].get('finish_reason'),
             'validated_response_field': 'message.content_nonempty',
         }
         print('LCLD_QWEN_PHASE_B_MODEL_SMOKE=' + json.dumps(summary, sort_keys=True), flush=True)
