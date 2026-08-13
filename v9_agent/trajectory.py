@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, replace
+from typing import List, Optional
 
 from .observe import stable_hash
 from .types import ARGALiteSnapshot, HypothesisItem, Progress, TestStep
