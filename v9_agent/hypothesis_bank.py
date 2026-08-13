@@ -1668,7 +1668,7 @@ def _contiguous_step_indices(raw_steps: list[Any]) -> bool:
             return False
         try:
             indices.append(int(item.get("step_index")))
-        except Exception:
+        except (TypeError, ValueError, AttributeError):
             return False
     return indices == list(range(len(indices)))
 
@@ -2581,7 +2581,7 @@ def _as_items(value: Any) -> tuple[Any, ...]:
 def _float(value: Any, default: float) -> float:
     try:
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
@@ -2592,7 +2592,7 @@ def _nonzero_delta(delta: Any) -> bool:
         try:
             if abs(float(value)) > 1e-6:
                 return True
-        except Exception:
+        except (TypeError, ValueError):
             return False
     return False
 
@@ -2655,7 +2655,7 @@ def _delta_xy_pair(delta: Any) -> tuple[float, float]:
         return (0.0, 0.0)
     try:
         return (float(delta[0]), float(delta[1]))
-    except Exception:
+    except (TypeError, ValueError):
         return (0.0, 0.0)
 
 
