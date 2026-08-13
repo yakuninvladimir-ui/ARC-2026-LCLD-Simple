@@ -2193,7 +2193,11 @@ def _validate_v87_semantic_output(value: dict[str, Any]) -> bool:
             or len(target_xy) != 2
             or any(not isinstance(v, int) or isinstance(v, bool) or v < 0 or v > 1023 for v in target_xy)
         ):
+            # Strip malformed target_xy instead of mutating the input dict.
+            # Create a shallow copy of objective to avoid side-effects.
+            objective = {**objective}
             objective.pop("target_xy", None)
+            item = {**item, "objective": objective}
         if objective.get("kind") not in objective_kinds:
             return False
         if not _valid_string_array(objective.get("source_objects"), max_items=6):
@@ -2287,10 +2291,15 @@ def _json_object_values_from_repaired_regions(text: str):
 
 
 def _candidate_json_regions(text: str):
+    """Generate all candidate JSON regions from text.
+    
+    For each opening brace, yield regions ending at each subsequent closing brace.
+    This allows parsing valid JSON prefixes even when followed by malformed text.
+    """
     starts = [idx for idx, char in enumerate(text) if char == "{"]
     ends = [idx + 1 for idx, char in enumerate(text) if char == "}"]
     for start in starts:
-        for end in reversed(ends):
+        for end in ends:
             if end <= start:
                 continue
             yield start, end
