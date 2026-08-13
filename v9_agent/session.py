@@ -279,9 +279,17 @@ class GameSession:
                         return self._emit_attempt_reset(snapshot, "no_executable_hypothesis_fallback_exhausted")
                     self._fallback_streak_by_level[state.level_index] += 1
                     return self._emit(snapshot, fallback)
-                if self._can_reset_failed_attempt(state.level_index):
-                    return self._emit_attempt_reset(snapshot, "no_executable_verified_hypothesis")
-                raise RuntimeError("no verifier-authorized action: no executable hypothesis remains and safe fallback produced nothing")
+                # Exhaustion without fallback: emit controlled RESET instead of hard crash
+                runtime_log(
+                    "verifier_exhausted_no_fallback",
+                    level=state.level_index,
+                    step=state.step_index,
+                    semantic_queue_count=len(self.bank.semantic_test_queue),
+                    verified_semantic_count=len(self.bank.verified_semantic),
+                    coordinate_queue_count=len(self.bank.coordinate_test_queue),
+                    confirmed_rule_count=len(self.bank.confirmed_rules),
+                )
+                return self._emit_attempt_reset(snapshot, "verifier_exhausted_no_fallback", source="verifier_exhausted")
             preflight = self.preflight_judge.validate(candidate, snapshot, self.memory, self.config)
             if preflight.valid:
                 break
@@ -289,15 +297,25 @@ class GameSession:
             runtime_log("preflight_reject", action=candidate.to_arc_action(), reason=preflight.reason_code, fallback_enabled=False)
             self.bank.reject_candidate(candidate.hypothesis_id, f"preflight_{preflight.reason_code}", snapshot)
             if sig in seen_rejections:
-                if self._can_reset_failed_attempt(state.level_index):
-                    return self._emit_attempt_reset(snapshot, f"repeated_preflight_rejection:{preflight.reason_code}")
-                raise RuntimeError(f"preflight rejected the same candidate twice with fallback disabled: {preflight.reason_code}")
+                # Repeated preflight rejection: controlled RESET instead of hard crash
+                runtime_log(
+                    "repeated_preflight_rejection_reset",
+                    level=state.level_index,
+                    step=state.step_index,
+                    reason_code=preflight.reason_code,
+                )
+                return self._emit_attempt_reset(snapshot, f"repeated_preflight_rejection:{preflight.reason_code}", source="verifier_exhausted")
             seen_rejections.add(sig)
         if candidate is None or preflight is None or not preflight.valid:
             reason = preflight.reason_code if preflight is not None else "none"
-            if self._can_reset_failed_attempt(state.level_index):
-                return self._emit_attempt_reset(snapshot, f"no_legal_verified_candidate:{reason}")
-            raise RuntimeError(f"no legal candidate after verified queue scan with fallback disabled: {reason}")
+            # No legal candidate after verified queue scan: controlled RESET instead of hard crash
+            runtime_log(
+                "no_legal_candidate_reset",
+                level=state.level_index,
+                step=state.step_index,
+                reason_code=reason,
+            )
+            return self._emit_attempt_reset(snapshot, f"no_legal_verified_candidate:{reason}", source="verifier_exhausted")
         return self._emit(snapshot, candidate)
 
     def observe_action_result(self, after_observation: Mapping[str, Any] | None = None) -> bool:
