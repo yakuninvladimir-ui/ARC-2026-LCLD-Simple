@@ -42,6 +42,102 @@ class QwenClient:
             raise QwenBackendError(f"unsupported qwen backend: {config.qwen_backend}")
         return {}
 
+    def health_check(self, config: V8Config) -> dict[str, Any]:
+        """
+        Returns {"ok": True/False, "backend": str, "detail": str}.
+        Must not raise; must be cheap (timeout ~2s).
+        """
+        backend = config.qwen_backend
+        if not config.enable_qwen or backend == "disabled":
+            return {"ok": True, "backend": backend, "detail": "qwen_disabled"}
+        if backend == "fake":
+            return {"ok": True, "backend": backend, "detail": "offline_fake"}
+        if backend == "ollama":
+            return self._health_check_ollama(config)
+        if backend == "vllm":
+            return self._health_check_vllm(config)
+        if backend in {"qwen_local", "llama_cli"}:
+            return self._health_check_llama_cli(config)
+        return {"ok": False, "backend": backend, "detail": "unknown_backend"}
+
+    def _health_check_ollama(self, config: V8Config) -> dict[str, Any]:
+        base_url = _normalize_ollama_base_url(config.qwen_ollama_base_url)
+        endpoint = f"{base_url}/api/tags"
+        try:
+            request = urllib_request.Request(endpoint, method="GET")
+            with urllib_request.urlopen(request, timeout=2) as response:
+                if response.status == 200:
+                    return {"ok": True, "backend": "ollama", "detail": "ready"}
+                return {"ok": False, "backend": "ollama", "detail": f"http_{response.status}"}
+        except (socket.timeout, TimeoutError) as exc:
+            return {"ok": False, "backend": "ollama", "detail": "timeout"}
+        except urllib_error.URLError as exc:
+            return {"ok": False, "backend": "ollama", "detail": f"connection_error:{exc.reason}"}
+        except Exception as exc:
+            return {"ok": False, "backend": "ollama", "detail": f"error:{exc}"}
+
+    def _health_check_vllm(self, config: V8Config) -> dict[str, Any]:
+        base_url = _normalize_vllm_base_url(config.qwen_vllm_base_url)
+        # Try the standard OpenAI-compatible /v1/models endpoint first
+        endpoint = f"{base_url}/models"
+        try:
+            request = urllib_request.Request(endpoint, method="GET")
+            with urllib_request.urlopen(request, timeout=2) as response:
+                if response.status == 200:
+                    return {"ok": True, "backend": "vllm", "detail": "ready"}
+                return {"ok": False, "backend": "vllm", "detail": f"http_{response.status}"}
+        except (socket.timeout, TimeoutError):
+            pass
+        except urllib_error.URLError:
+            pass
+        except Exception:
+            pass
+        # Fallback: try a minimal completion ping
+        model = str(config.qwen_vllm_model or "vrfai/Qwen3.6-27B-FP8")
+        chat_endpoint = f"{base_url}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "."}],
+            "max_tokens": 1,
+            "stream": False,
+        }
+        try:
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            request = urllib_request.Request(
+                chat_endpoint,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib_request.urlopen(request, timeout=2) as response:
+                if response.status == 200:
+                    return {"ok": True, "backend": "vllm", "detail": "ready_completion"}
+                return {"ok": False, "backend": "vllm", "detail": f"http_{response.status}"}
+        except (socket.timeout, TimeoutError):
+            return {"ok": False, "backend": "vllm", "detail": "timeout"}
+        except urllib_error.URLError as exc:
+            return {"ok": False, "backend": "vllm", "detail": f"connection_error:{exc.reason}"}
+        except Exception as exc:
+            return {"ok": False, "backend": "vllm", "detail": f"error:{exc}"}
+
+    def _health_check_llama_cli(self, config: V8Config) -> dict[str, Any]:
+        model_path = Path(str(config.qwen_model_path or os.environ.get("ARC_QWEN_MODEL_PATH") or ""))
+        llama_cli = _resolve_llama_cli(config.qwen_llama_cli_path or os.environ.get("ARC_QWEN_LLAMA_CLI_PATH") or "llama-cli")
+        if not model_path.exists():
+            return {"ok": False, "backend": "llama_cli", "detail": "model_not_found"}
+        if llama_cli is None:
+            return {"ok": False, "backend": "llama_cli", "detail": "cli_not_found"}
+        # Quick version check as a liveness probe
+        try:
+            proc = subprocess.run([str(llama_cli), "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2, check=False)
+            if proc.returncode == 0:
+                return {"ok": True, "backend": "llama_cli", "detail": "ready"}
+            return {"ok": False, "backend": "llama_cli", "detail": f"rc_{proc.returncode}"}
+        except (subprocess.TimeoutExpired, TimeoutError):
+            return {"ok": False, "backend": "llama_cli", "detail": "timeout"}
+        except Exception as exc:
+            return {"ok": False, "backend": "llama_cli", "detail": f"error:{exc}"}
+
     def _call_llama_cli_once(self, role: QwenRole, packet: dict[str, Any], config: V8Config) -> dict[str, Any]:
         model_path = Path(str(config.qwen_model_path or os.environ.get("ARC_QWEN_MODEL_PATH") or ""))
         llama_cli = _resolve_llama_cli(config.qwen_llama_cli_path or os.environ.get("ARC_QWEN_LLAMA_CLI_PATH") or "llama-cli")
@@ -1799,7 +1895,7 @@ def _extract_json(text: str, *, role: QwenRole | None = None) -> dict[str, Any]:
     if not raw:
         return {}
     # Сначала пробуем извлечь из markdown-блока
-    markdown_pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
+    markdown_pattern = r"```(?:json)?\s*(\{.*\})\s*```"
     match = re.search(markdown_pattern, raw, re.DOTALL | re.IGNORECASE)
     if match:
         candidate = match.group(1).strip()
@@ -2196,9 +2292,8 @@ def _candidate_json_regions(text: str):
     for start in starts:
         for end in reversed(ends):
             if end <= start:
-                break
+                continue
             yield start, end
-            break
 
 
 def _repair_json_trailing_commas(text: str) -> str:

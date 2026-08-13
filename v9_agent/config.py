@@ -6,7 +6,7 @@ from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
-class V8Config:
+class V9Config:
     # The internal name remains compatible with the V8 notebook integration.
     enable_qwen: bool = True
     qwen_backend: str = "fake"  # disabled | fake | ollama | vllm | qwen_local | llama_cli
@@ -133,6 +133,10 @@ class V8Config:
     preserve_object_tracks: bool = True
 
 
+# Back-compat alias: V8Config and V9Config refer to the same dataclass
+V8Config = V9Config
+
+
 def _bool_env(value: str | None, default: bool) -> bool:
     if value is None or value == "":
         return default
@@ -153,8 +157,8 @@ def _coerce(value: Any, target: type, current: Any) -> Any:
     return value
 
 
-def config_from_mapping(mapping: dict[str, Any] | None = None) -> V8Config:
-    cfg = V8Config()
+def config_from_mapping(mapping: dict[str, Any] | None = None) -> V9Config:
+    cfg = V9Config()
     data = dict(mapping or {})
 
     aliases = {
@@ -230,7 +234,7 @@ def config_from_mapping(mapping: dict[str, Any] | None = None) -> V8Config:
         "prompt_compaction_strategy": ("ARC_LLM_CONTEXT_STRATEGY",),
     }
     normalized: dict[str, Any] = {}
-    for f in fields(V8Config):
+    for f in fields(V9Config):
         if f.name in data:
             normalized[f.name] = data[f.name]
         for env_name in env_aliases.get(f.name, ()):
@@ -239,7 +243,7 @@ def config_from_mapping(mapping: dict[str, Any] | None = None) -> V8Config:
                 normalized[f.name] = raw
                 break
 
-    for f in fields(V8Config):
+    for f in fields(V9Config):
         if f.name not in normalized:
             continue
         current = getattr(cfg, f.name)
@@ -258,4 +262,4 @@ def config_from_mapping(mapping: dict[str, Any] | None = None) -> V8Config:
 
 
 def default_config_dict() -> dict[str, Any]:
-    return {f.name: getattr(V8Config(), f.name) for f in fields(V8Config)}
+    return {f.name: getattr(V9Config(), f.name) for f in fields(V9Config)}

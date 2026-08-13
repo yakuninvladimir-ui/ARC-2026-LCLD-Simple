@@ -612,6 +612,16 @@ class TrajectoryVerifier:
 
         # Build planner goal with explicit hash resolution.
         goal_hash, goal_source = resolve_goal_hash(item, snapshot, memory, simulated_final=None)
+        
+        # If no explicit goal can be resolved, reject the trajectory — there is no
+        # target to plan toward and no empiric execution can validate progress.
+        if goal_hash is None:
+            return TrajectoryVerificationResult(
+                status="REJECT",
+                reason="no_resolved_goal_hash",
+                details={**shared_details, "goal_source": goal_source},
+            )
+        
         planner_goal: dict[str, object] = {}
         if isinstance(item.goal_spec, dict):
             planner_goal = {

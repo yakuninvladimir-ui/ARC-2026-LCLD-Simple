@@ -596,9 +596,9 @@ if IS_PHASE_B_CANDIDATE:
             max(1, int(VLLM_MAX_NUM_SEQS)),
             max(1, len(env_infos)),
         )
-        if game_concurrency != min(max(1, int(VLLM_MAX_NUM_SEQS)), max(1, len(env_infos))):
+        if game_concurrency > min(max(1, int(VLLM_MAX_NUM_SEQS)), max(1, len(env_infos))):
             raise RuntimeError(
-                'competition worker count must equal active vLLM sequence capacity: '
+                'competition worker count must not exceed active vLLM sequence capacity: '
                 f'workers={game_concurrency} max_num_seqs={VLLM_MAX_NUM_SEQS}'
             )
         abort_event = threading.Event()

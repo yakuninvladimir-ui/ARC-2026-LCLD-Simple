@@ -134,6 +134,11 @@ class GameSession:
         # Single owner of dual-view identity for the current snapshot cycle.
         self._planning_set: PlanningSet | None = None
         self._planning_set_snapshot_id: str | None = None
+        # Telemetry: count of auto-commit fallback invocations (P0-3).
+        self._compat_auto_commit_count = 0
+        # P0-4: Qwen backend health-check state.
+        self._qwen_backend_health_checked = False
+        self._qwen_backend_healthy = True
 
     def update_runtime_config(self, updates: Mapping[str, Any] | None) -> None:
         if not updates:
@@ -147,11 +152,32 @@ class GameSession:
 
         if self.pending_action is not None:
             # Compatibility fallback for starter loops that do not call observe_action_result.
+            # Distinguish between a rejected action (state changed) and a stall/hang
+            # (same snapshot_id or same grid_hash + step_index).
             if snapshot.snapshot_id == self.pending_action.before_snapshot.snapshot_id or (
                 snapshot.grid_hash == self.pending_action.before_snapshot.grid_hash
                 and snapshot.step_index == self.pending_action.before_snapshot.step_index
             ):
                 raise RuntimeError("cannot emit a new action while the previous official transition is uncommitted")
+            # Additional guard: if state_name indicates the environment rejected the action
+            # (e.g., returned to NOT_PLAYED or unchanged frame_index), treat as rejection,
+            # not as a harness skip. This prevents mis-classifying stalls.
+            if state.state_name in {"NOT_PLAYED"} or getattr(state, "frame_index", -1) == getattr(self.pending_action.before_snapshot, "frame_index", -2):
+                runtime_log(
+                    "compat_fallback_rejected_action",
+                    level=state.level_index,
+                    step=state.step_index,
+                    state_name=state.state_name,
+                    frame_index=getattr(state, "frame_index", None),
+                    message="environment appears to have rejected pending action; compatibility fallback will commit but outer loop should inspect result",
+                )
+            runtime_log(
+                "compat_auto_commit_used",
+                level=state.level_index,
+                step=state.step_index,
+                message="harness skipped observe_action_result; auto-commit applied",
+            )
+            self._compat_auto_commit_count += 1
             self._commit_pending(snapshot)
 
         is_new_level = self._apply_level_boundary_after_commit(state, snapshot)
@@ -334,6 +360,7 @@ class GameSession:
         return {
             "observed_transition_ingestions": self._observed_transition_ingestions,
             "observed_transition_duplicate_skips": self._observed_transition_duplicate_skips,
+            "compat_auto_commit_count": self._compat_auto_commit_count,
             "pending_official_transition": self.pending_action is not None,
             "pending_transition_token": self.pending_action.token_id if self.pending_action else None,
             "last_committed_transition_token": self._last_committed_token,
