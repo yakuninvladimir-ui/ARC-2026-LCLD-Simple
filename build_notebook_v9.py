@@ -1,11 +1,11 @@
-"""Build the V9 Qwen3.6-27B FP8/vLLM ARC-AGI-3 Kaggle notebook.
+"""Build the V9 Muse Glimmer 30B BF16/vLLM ARC-AGI-3 Kaggle notebook.
 
 Place this file in the project root and run:
 
     python build_notebook_v9.py
 
 The notebook embeds the verified LCLD agent and keeps the Tufa-derived
-competition lifecycle while using Tufa's Qwen FP8 snapshot and vLLM wheelhouse.
+competition lifecycle while using vLLM 0.27.1 CUDA 13 wheelhouse and Muse Glimmer 30B model.
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ NOTEBOOK_ROOT = ROOT / "notebooks"
 NOTEBOOK_PATH = NOTEBOOK_ROOT / "arc-prize-2026-lcld-qwen-v9.ipynb"
 KERNEL_METADATA_PATH = NOTEBOOK_ROOT / "kernel-metadata.json"
 ASSET_METADATA_PATH = ROOT / "assets" / "dataset-metadata.json"
-VLLM_WHEELHOUSE_DATASET_SOURCE = "driessmit1/arc3-vllm-h100-wheelhouse-v3"
-QWEN_MODEL_DATASET_SOURCE = "driessmit1/vrfai-qwen3-6-27b-fp8-hf-snapshot"
+VLLM_WHEELHOUSE_DATASET_SOURCE = "vladimiryakunin/vllm-027-cuda13-wheels"
+QWEN_MODEL_DATASET_SOURCE = "ravinderonkaggle/muse-glimmer-30b-bf16"
 COMPETITION_SOURCE = "arc-prize-2026-arc-agi-3"
 
 MARKER = "ARC_V9_SAFE_HARNESS_THINKING32K_DYNAMIC_ENUM_LCLD_CONCURRENCY5"
@@ -324,7 +324,7 @@ def _generated_submission_source() -> str:
                 "qwen_repeat_penalty": float(os.environ.get("ARC_QWEN_REPEAT_PENALTY", "1.0")),
                 "qwen_vllm_base_url": os.environ.get("ARC_QWEN_VLLM_BASE_URL", "http://127.0.0.1:1234/v1"),
                 "qwen_vllm_api_key": os.environ.get("ARC_QWEN_VLLM_API_KEY", "EMPTY"),
-                "qwen_vllm_model": os.environ.get("ARC_QWEN_VLLM_MODEL", "vrfai/Qwen3.6-27B-FP8"),
+                "qwen_vllm_model": os.environ.get("ARC_QWEN_VLLM_MODEL", "ravinderonkaggle/muse-glimmer-30b-bf16"),
                 "qwen_multimodal_enabled": os.environ.get("ARC_QWEN_MULTIMODAL_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
                 "qwen_require_runtime": os.environ.get("LCLD_REQUIRE_QWEN_RUNTIME", "1").lower() in {"1", "true", "yes", "on"},
                 "max_qwen_calls_per_game": int(os.environ.get("ARC_V8_MAX_QWEN_CALLS_PER_GAME", "20")),
@@ -590,7 +590,7 @@ def _preflight_script_source() -> str:
         assert bool(delegate.config.get('qwen_enable_thinking')) == thinking_enabled, repr(delegate.config)
         assert delegate.config.get('qwen_reasoning_mode') == ('on' if thinking_enabled else 'off'), repr(delegate.config)
         assert int(delegate.config.get('qwen_reasoning_budget_tokens', -1)) == reasoning_budget_tokens, repr(delegate.config)
-        assert delegate.config.get('qwen_vllm_model') == 'vrfai/Qwen3.6-27B-FP8', repr(delegate.config)
+        assert delegate.config.get('qwen_vllm_model') == 'ravinderonkaggle/muse-glimmer-30b-bf16', repr(delegate.config)
         assert delegate.config.get('qwen_multimodal_enabled') is True, repr(delegate.config)
         assert int(delegate.config.get('qwen_context_tokens', 0)) == 131072, repr(delegate.config)
         assert int(delegate.config.get('qwen_max_input_tokens', 0)) == 65536, repr(delegate.config)
