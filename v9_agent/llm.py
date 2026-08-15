@@ -93,7 +93,7 @@ class QwenClient:
         except Exception:
             pass
         # Fallback: try a minimal completion ping
-        model = str(config.qwen_vllm_model or "vrfai/Qwen3.6-27B-FP8")
+        model = str(config.qwen_vllm_model or "ravinderonkaggle/muse-glimmer-30b-bf16")
         chat_endpoint = f"{base_url}/chat/completions"
         payload = {
             "model": model,
@@ -394,7 +394,7 @@ class QwenClient:
         schema_mode = _output_schema_mode()
         output_schema = _vllm_compatible_output_schema(_allowed_output_schema(role, compacted))
         base_url = _normalize_vllm_base_url(config.qwen_vllm_base_url)
-        model = str(config.qwen_vllm_model or "vrfai/Qwen3.6-27B-FP8")
+        model = str(config.qwen_vllm_model or "ravinderonkaggle/muse-glimmer-30b-bf16")
         endpoint = f"{base_url}/chat/completions"
         thinking_enabled = bool(config.qwen_enable_thinking)
         content: str | list[dict[str, Any]] = prompt
