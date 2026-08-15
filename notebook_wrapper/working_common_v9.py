@@ -289,10 +289,11 @@ def _build_vllm_command(model_path):
         # rejects every Qwen call with HTTP 400 and kills the run instantly.
         '--limit-mm-per-prompt', '{"image": 4}',
         '--enable-auto-tool-choice',
-        '--tool-call-parser', 'qwen3_coder',
-        '--generation-config', 'vllm',
+        '--tool-call-parser', 'muse_glimmer',
+        '--generation-config', 'auto',
         '--enable-prefix-caching',
         '--mm-processor-cache-gb', '0',
+        '--kv-cache-dtype', 'fp8',
         '--default-chat-template-kwargs', json.dumps({
             'enable_thinking': QWEN_THINKING_ENABLED,
         }),
@@ -300,7 +301,7 @@ def _build_vllm_command(model_path):
     ]
     if QWEN_THINKING_ENABLED:
         command.extend([
-            '--reasoning-parser', 'qwen3',
+            '--reasoning-parser', 'muse_glimmer',
         ])
     return command
 

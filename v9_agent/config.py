@@ -17,7 +17,7 @@ class V9Config:
     qwen_ollama_keep_alive: str = "-1"
     qwen_vllm_base_url: str = "http://127.0.0.1:1234/v1"
     qwen_vllm_api_key: str = "EMPTY"
-    qwen_vllm_model: str = "vrfai/Qwen3.6-27B-FP8"
+    qwen_vllm_model: str = "ravinderonkaggle/muse-glimmer-30b-bf16"
     qwen_llama_device: str | None = None
     qwen_split_mode: str = ""
     qwen_tensor_split: str = ""
