@@ -12,9 +12,9 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 MARKER = 'ARC_V9_SAFE_HARNESS_THINKING32K_STATIC_SCHEMA_SERIAL_GATEWAY'
-VLLM_WHEELHOUSE_DATASET = 'driessmit1/arc3-vllm-h100-wheelhouse-v3'
-QWEN_MODEL_DATASET = 'driessmit1/vrfai-qwen3-6-27b-fp8-hf-snapshot'
-QWEN_MODEL_NAME = 'vrfai/Qwen3.6-27B-FP8'
+VLLM_WHEELHOUSE_DATASET = 'vladimiryakunin/vllm-027-cuda13-wheels'
+QWEN_MODEL_DATASET = 'ravinderonkaggle/muse-glimmer-30b-bf16'
+QWEN_MODEL_NAME = 'ravinderonkaggle/muse-glimmer-30b-bf16'
 VLLM_HOST = '127.0.0.1'
 VLLM_PORT = 1234
 VLLM_BASE_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/v1'
@@ -31,7 +31,7 @@ QWEN_THINKING_ENABLED = True
 # The OSS vLLM OpenAI endpoint has no per-request thinking-budget parameter.
 # ``max_tokens`` is the hard cap for thinking plus final JSON.
 QWEN_REASONING_BUDGET_TOKENS = 32000
-VLLM_WHEELHOUSE_STAMP = 'vllm==0.19.0 torch==2.10.0 flashinfer==0.6.6\n'
+VLLM_WHEELHOUSE_STAMP = 'vllm==0.27.1 torch==2.10.0 flashinfer==0.6.6\n'
 
 working_root = pathlib.Path('/kaggle/working')
 working_root.mkdir(parents=True, exist_ok=True)
@@ -146,7 +146,7 @@ def _find_qwen_model():
     weight_bytes = sum(path.stat().st_size for path in weight_files)
     if not weight_files or weight_bytes < 20_000_000_000:
         raise RuntimeError(
-            f'Qwen3.6-27B FP8 weights are incomplete at {model_path}: '
+            f'Muse Glimmer 30B BF16 weights are incomplete at {model_path}: '
             f'files={len(weight_files)} bytes={weight_bytes}'
         )
     print('Qwen model:', model_path, 'weight_files=', len(weight_files), 'weight_bytes=', weight_bytes, flush=True)
@@ -177,9 +177,9 @@ def _install_vllm_wheelhouse():
     wheelhouse = _dataset_mount(VLLM_WHEELHOUSE_DATASET)
     requirements = wheelhouse / 'requirements.lock'
     if not requirements.is_file():
-        raise FileNotFoundError('Missing Tufa vLLM requirements.lock: ' + str(requirements))
+        raise FileNotFoundError('Missing vLLM 0.27.1 CUDA 13 wheelhouse requirements.lock: ' + str(requirements))
     site_packages = _vllm_site_packages()
-    stamp = site_packages / '.arc3-vllm-h100-wheelhouse-v3'
+    stamp = site_packages / '.vllm-027-cuda13-wheels'
     if stamp.is_file() and stamp.read_text(encoding='utf-8') == VLLM_WHEELHOUSE_STAMP:
         probe = subprocess.run(
             [sys.executable, '-c', "import vllm, torch; print(vllm.__version__, torch.__version__)"],
@@ -190,7 +190,7 @@ def _install_vllm_wheelhouse():
             check=False,
         )
         if probe.returncode == 0:
-            print('Using cached Tufa vLLM target:', site_packages, probe.stdout.strip(), flush=True)
+            print('Using cached vLLM 0.27.1 target:', site_packages, probe.stdout.strip(), flush=True)
             return site_packages
     shutil.rmtree(site_packages, ignore_errors=True)
     site_packages.mkdir(parents=True, exist_ok=True)
@@ -202,7 +202,7 @@ def _install_vllm_wheelhouse():
         '--upgrade', '--ignore-installed', '--only-binary', ':all:',
         '--no-compile', '--disable-pip-version-check', '--no-warn-conflicts',
     ]
-    print('Installing Tufa vLLM wheelhouse into', site_packages, flush=True)
+    print('Installing vLLM 0.27.1 CUDA 13 wheelhouse into', site_packages, flush=True)
     subprocess.run(cmd, check=True)
     stamp.write_text(VLLM_WHEELHOUSE_STAMP, encoding='utf-8')
     return site_packages
@@ -246,9 +246,9 @@ def _configure_qwen_env(model_path):
         'ARC_QWEN_TRACE_DIR': '',
         'ARC_V8_TRACE_PATH': os.devnull,
         'ARC_QWEN_MODEL_PROFILE_ID': (
-            'vrfai_qwen3_6_27b_fp8_vllm_thinking_128k'
+            'muse_glimmer_30b_bf16_vllm_thinking_128k'
             if QWEN_THINKING_ENABLED
-            else 'vrfai_qwen3_6_27b_fp8_vllm_nonthinking_128k'
+            else 'muse_glimmer_30b_bf16_vllm_nonthinking_128k'
         ),
         'ARC_MAX_QWEN_PRIMARY_CALLS_PER_LEVEL': '3',
         'ARC_MAX_QWEN_REPLAN_CALLS_PER_LEVEL': '0',
@@ -326,7 +326,7 @@ def vllm_server_ready():
 
 def _vllm_log_tail(limit=12000):
     # Bounded read: never materialize the complete vLLM log in memory.
-    log_path = working_root / 'vllm-qwen36.log'
+    log_path = working_root / 'vllm-muse-glimmer.log'
     if not log_path.is_file():
         return ''
     try:
@@ -369,10 +369,10 @@ def start_vllm_server(model_path, *, wait):
         return {'pid': vllm_process.pid, 'ready': bool(wait), 'startup_seconds': startup_seconds, 'reused': True}
     _install_vllm_wheelhouse()
     cmd = _build_vllm_command(model_path)
-    log_path = working_root / 'vllm-qwen36.log'
+    log_path = working_root / 'vllm-muse-glimmer.log'
     vllm_log_handle = log_path.open('w', encoding='utf-8')
     vllm_started_at = time.monotonic()
-    print('Starting Tufa vLLM Qwen server:', cmd, flush=True)
+    print('Starting Tufa vLLM Muse Glimmer server:', cmd, flush=True)
     vllm_process = subprocess.Popen(
         [str(part) for part in cmd],
         stdout=vllm_log_handle,
@@ -381,7 +381,7 @@ def start_vllm_server(model_path, *, wait):
         text=True,
     )
     os.environ['ARC_QWEN_VLLM_PID'] = str(vllm_process.pid)
-    (working_root / 'vllm-qwen36-command.json').write_text(
+    (working_root / 'vllm-muse-glimmer-command.json').write_text(
         json.dumps({'command': cmd, 'pid': vllm_process.pid, 'started_at_utc': _utc_now()}, indent=2) + '\n',
         encoding='utf-8',
     )
