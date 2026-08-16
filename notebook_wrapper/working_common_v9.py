@@ -12,7 +12,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 MARKER = 'ARC_V9_SAFE_HARNESS_THINKING32K_STATIC_SCHEMA_SERIAL_GATEWAY'
-VLLM_WHEELHOUSE_DATASET = 'vladimiryakunin/vllm-027-cuda13-wheels'
+VLLM_WHEELHOUSE_DATASET = 'vladimiryakunin/vllm-027-cuda-wheels'
 QWEN_MODEL_DATASET = 'ravinderonkaggle/muse-glimmer-30b-bf16'
 QWEN_MODEL_NAME = 'ravinderonkaggle/muse-glimmer-30b-bf16'
 VLLM_HOST = '127.0.0.1'
@@ -20,7 +20,7 @@ VLLM_PORT = 1234
 VLLM_BASE_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/v1'
 VLLM_HEALTH_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/health'
 VLLM_STARTUP_TIMEOUT_SECONDS = 900
-VLLM_MAX_MODEL_LEN = 131072
+VLLM_MAX_MODEL_LEN = 32768
 VLLM_MAX_NUM_SEQS = 5
 VLLM_TENSOR_PARALLEL_SIZE = 1
 QWEN_MAX_INPUT_TOKENS = 65536
@@ -179,7 +179,7 @@ def _install_vllm_wheelhouse():
     if not requirements.is_file():
         raise FileNotFoundError('Missing vLLM 0.27.1 CUDA 13 wheelhouse requirements.lock: ' + str(requirements))
     site_packages = _vllm_site_packages()
-    stamp = site_packages / '.vllm-027-cuda13-wheels'
+    stamp = site_packages / '.vllm-027-cuda-wheels'
     if stamp.is_file() and stamp.read_text(encoding='utf-8') == VLLM_WHEELHOUSE_STAMP:
         probe = subprocess.run(
             [sys.executable, '-c', "import vllm, torch; print(vllm.__version__, torch.__version__)"],
@@ -293,11 +293,14 @@ def _build_vllm_command(model_path):
         '--generation-config', 'auto',
         '--enable-prefix-caching',
         '--mm-processor-cache-gb', '0',
+        '--dtype', 'bfloat16',
         '--kv-cache-dtype', 'fp8',
+        '--gpu-memory-utilization', '0.92',
         '--default-chat-template-kwargs', json.dumps({
             'enable_thinking': QWEN_THINKING_ENABLED,
         }),
         '--max-model-len', str(VLLM_MAX_MODEL_LEN),
+        '--enforce-eager', 'False',
     ]
     if QWEN_THINKING_ENABLED:
         command.extend([
@@ -476,7 +479,7 @@ def structural_preflight():
     expected = {
         'qwen_backend': 'vllm',
         'qwen_multimodal_enabled': True,
-        'qwen_context_tokens': 131072,
+        'qwen_context_tokens': 32768,
         'qwen_minimum_acceptance_context_tokens': 65536,
         'qwen_max_input_tokens': 65536,
         'qwen_max_output_tokens': 49152,
@@ -494,8 +497,8 @@ def structural_preflight():
     if config.qwen_vllm_model != QWEN_MODEL_NAME or bool(config.qwen_enable_thinking) != QWEN_THINKING_ENABLED:
         raise RuntimeError('Qwen vLLM model/thinking contract mismatch')
     sampling_expected = {
-        'qwen_temperature': 0.4,
-        'qwen_top_p': 0.95,
+        'qwen_temperature': 0.7,
+        'qwen_top_p': 0.9,
         'qwen_top_k': 30,
         'qwen_presence_penalty': 0.05,
     }
@@ -630,8 +633,8 @@ def phase_b_model_smoke_or_die():
                 'role': 'user',
                 'content': 'Return the required JSON object.',
             }],
-            'temperature': 0.4,
-            'top_p': 0.95,
+            'temperature': 0.7,
+            'top_p': 0.9,
             'min_p': 0.05,
             'presence_penalty': 0.05,
             'repetition_penalty': 1.05,
@@ -780,7 +783,7 @@ def _smoke_build_combat_payload(config, with_schema=True):
         'messages': [{'role': 'user', 'content': content}],
         'stream': False,
         'max_tokens': QWEN_MAX_OUTPUT_TOKENS,
-        'temperature': 0.4, 'top_k': 30, 'top_p': 0.95, 'min_p': 0.05,
+        'temperature': 0.7, 'top_k': 30, 'top_p': 0.9, 'min_p': 0.05,
         'presence_penalty': 0.05, 'repetition_penalty': 1.05, 'seed': 0,
         'chat_template_kwargs': {'enable_thinking': QWEN_THINKING_ENABLED},
     }
@@ -854,7 +857,7 @@ def run_phase_a_heavy_smoke():
     print('[HEAVY-SMOKE] GPU before:', _smoke_gpu_info(), flush=True)
 
     # --- baseline 1: чистый decode без thinking ---
-    base = {'model': QWEN_MODEL_NAME, 'stream': False, 'max_tokens': 1024, 'temperature': 0.4,
+    base = {'model': QWEN_MODEL_NAME, 'stream': False, 'max_tokens': 1024, 'temperature': 0.7, 'top_p': 0.9,
             'messages': [{'role': 'user', 'content': 'Count from 1 to 400, one number per line.'}],
             'chat_template_kwargs': {'enable_thinking': False}}
     print('[HEAVY-SMOKE]', json.dumps(_smoke_send('baseline_no_thinking', base, 600), sort_keys=True), flush=True)
