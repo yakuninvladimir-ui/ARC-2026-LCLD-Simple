@@ -232,9 +232,9 @@ def _configure_qwen_env(model_path):
         'ARC_QWEN_REASONING_MODE': 'on' if QWEN_THINKING_ENABLED else 'off',
         'ARC_QWEN_REASONING_BUDGET_TOKENS': str(QWEN_REASONING_BUDGET_TOKENS),
         'ARC_QWEN_SCHEMA_MODE': 'dynamic_enum',
-        'ARC_QWEN_TEMPERATURE': '0.4',
+        'ARC_QWEN_TEMPERATURE': '0.7',
         'ARC_QWEN_TOP_K': '30',
-        'ARC_QWEN_TOP_P': '0.95',
+        'ARC_QWEN_TOP_P': '0.9',
         'ARC_QWEN_MIN_P': '0.05',
         'ARC_QWEN_PRESENCE_PENALTY': '0.05',
         'ARC_QWEN_REPEAT_PENALTY': '1.05',
@@ -711,7 +711,7 @@ def gateway_handshake_or_die():
 
 
 # === PHASE A HEAVY COMBAT SMOKE (диагностика; для финального сабмита выключить) ===
-PHASE_A_HEAVY_SMOKE = False
+PHASE_A_HEAVY_SMOKE = True
 HEAVY_SMOKE_WORKERS = VLLM_MAX_NUM_SEQS      # воспроизводим боевой параллелизм
 HEAVY_SMOKE_ROUNDS = 2
 HEAVY_SMOKE_REQ_TIMEOUT = 600                # верхняя граница на один запрос (снижено с 2400)
