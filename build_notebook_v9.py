@@ -33,7 +33,7 @@ NOTEBOOK_ROOT = ROOT / "notebooks"
 NOTEBOOK_PATH = NOTEBOOK_ROOT / "arc-prize-2026-lcld-qwen-v9.ipynb"
 KERNEL_METADATA_PATH = NOTEBOOK_ROOT / "kernel-metadata.json"
 ASSET_METADATA_PATH = ROOT / "assets" / "dataset-metadata.json"
-VLLM_WHEELHOUSE_DATASET_SOURCE = "vladimiryakunin/vllm-027-cuda13-wheels"
+VLLM_WHEELHOUSE_DATASET_SOURCE = "vladimiryakunin/vllm-027-cuda-wheels"
 QWEN_MODEL_DATASET_SOURCE = "ravinderonkaggle/muse-glimmer-30b-bf16"
 COMPETITION_SOURCE = "arc-prize-2026-arc-agi-3"
 
@@ -308,7 +308,7 @@ def _generated_submission_source() -> str:
                 "qwen_tensor_split": os.environ.get("ARC_QWEN_TENSOR_SPLIT", os.environ.get("LLAMA_ARG_TENSOR_SPLIT", "")),
                 "qwen_gpu_layers": int(os.environ.get("ARC_QWEN_GPU_LAYERS", "999")),
                 "qwen_timeout_seconds": int(os.environ.get("ARC_QWEN_TIMEOUT_SECONDS", "700")),
-                "qwen_context_tokens": int(os.environ.get("ARC_QWEN_CONTEXT_TOKENS", "131072")),
+                "qwen_context_tokens": int(os.environ.get("ARC_QWEN_CONTEXT_TOKENS", "32768")),
                 "qwen_minimum_acceptance_context_tokens": int(os.environ.get("ARC_QWEN_MINIMUM_ACCEPTANCE_CONTEXT_TOKENS", "65536")),
                 "qwen_max_input_tokens": int(os.environ.get("ARC_QWEN_MAX_INPUT_TOKENS", "65536")),
                 "qwen_max_output_tokens": int(os.environ.get("ARC_QWEN_MAX_OUTPUT_TOKENS", "49152")),
@@ -316,9 +316,9 @@ def _generated_submission_source() -> str:
                 "qwen_enable_thinking": thinking_enabled,
                 "qwen_reasoning_mode": "on" if thinking_enabled else "off",
                 "qwen_reasoning_budget_tokens": reasoning_budget_tokens,
-                "qwen_temperature": float(os.environ.get("ARC_QWEN_TEMPERATURE", "0.4")),
+                "qwen_temperature": float(os.environ.get("ARC_QWEN_TEMPERATURE", "0.7")),
                 "qwen_top_k": int(os.environ.get("ARC_QWEN_TOP_K", "30")),
-                "qwen_top_p": float(os.environ.get("ARC_QWEN_TOP_P", "0.95")),
+                "qwen_top_p": float(os.environ.get("ARC_QWEN_TOP_P", "0.9")),
                 "qwen_min_p": float(os.environ.get("ARC_QWEN_MIN_P", "0.0")),
                 "qwen_presence_penalty": float(os.environ.get("ARC_QWEN_PRESENCE_PENALTY", "0.05")),
                 "qwen_repeat_penalty": float(os.environ.get("ARC_QWEN_REPEAT_PENALTY", "1.0")),
@@ -592,11 +592,11 @@ def _preflight_script_source() -> str:
         assert int(delegate.config.get('qwen_reasoning_budget_tokens', -1)) == reasoning_budget_tokens, repr(delegate.config)
         assert delegate.config.get('qwen_vllm_model') == 'ravinderonkaggle/muse-glimmer-30b-bf16', repr(delegate.config)
         assert delegate.config.get('qwen_multimodal_enabled') is True, repr(delegate.config)
-        assert int(delegate.config.get('qwen_context_tokens', 0)) == 131072, repr(delegate.config)
+        assert int(delegate.config.get('qwen_context_tokens', 0)) == 32768, repr(delegate.config)
         assert int(delegate.config.get('qwen_max_input_tokens', 0)) == 65536, repr(delegate.config)
         assert int(delegate.config.get('qwen_max_output_tokens', 0)) == 49152, repr(delegate.config)
-        expected_temperature = float(os.environ.get('ARC_QWEN_TEMPERATURE', '0.4'))
-        expected_top_p = float(os.environ.get('ARC_QWEN_TOP_P', '0.95'))
+        expected_temperature = float(os.environ.get('ARC_QWEN_TEMPERATURE', '0.7'))
+        expected_top_p = float(os.environ.get('ARC_QWEN_TOP_P', '0.9'))
         expected_top_k = int(os.environ.get('ARC_QWEN_TOP_K', '30'))
         expected_presence = float(os.environ.get('ARC_QWEN_PRESENCE_PENALTY', '0.05'))
         assert float(delegate.config.get('qwen_temperature', -1)) == expected_temperature, repr(delegate.config)
@@ -707,15 +707,15 @@ def _adapt_working_phase_b_source(source: str) -> str:
                 'environment_adapter': None,
                 'external_action_effect_research': True,
                 'action_effect_exploration_before_qwen': True,
-                'qwen_context_tokens': int(os.environ.get('ARC_QWEN_CONTEXT_TOKENS', '131072')),
+                'qwen_context_tokens': int(os.environ.get('ARC_QWEN_CONTEXT_TOKENS', '32768')),
                 'qwen_minimum_acceptance_context_tokens': 65536,
                 'qwen_max_input_tokens': int(os.environ.get('ARC_QWEN_MAX_INPUT_TOKENS', '65536')),
                 'qwen_max_output_tokens': int(os.environ.get('ARC_QWEN_MAX_OUTPUT_TOKENS', '49152')),
                 'qwen_enable_thinking': thinking_enabled,
                 'qwen_reasoning_mode': 'on' if thinking_enabled else 'off',
                 'qwen_reasoning_budget_tokens': reasoning_budget_tokens,
-                'qwen_temperature': float(os.environ.get('ARC_QWEN_TEMPERATURE', '0.4')),
-                'qwen_top_p': float(os.environ.get('ARC_QWEN_TOP_P', '0.95')),
+                'qwen_temperature': float(os.environ.get('ARC_QWEN_TEMPERATURE', '0.7')),
+                'qwen_top_p': float(os.environ.get('ARC_QWEN_TOP_P', '0.9')),
                 'qwen_top_k': int(os.environ.get('ARC_QWEN_TOP_K', '30')),
                 'qwen_min_p': float(os.environ.get('ARC_QWEN_MIN_P', '0.05')),
                 'qwen_presence_penalty': float(os.environ.get('ARC_QWEN_PRESENCE_PENALTY', '0.05')),
