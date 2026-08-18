@@ -22,7 +22,7 @@ class V9Config:
     qwen_split_mode: str = ""
     qwen_tensor_split: str = ""
     qwen_gpu_layers: int = 999
-    qwen_temperature: float = 0.0
+    qwen_temperature: float = 0.7
     qwen_top_k: int = 20
     qwen_top_p: float = 0.95
     qwen_min_p: float = 0.0
