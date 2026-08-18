@@ -308,7 +308,7 @@ def _generated_submission_source() -> str:
                 "qwen_tensor_split": os.environ.get("ARC_QWEN_TENSOR_SPLIT", os.environ.get("LLAMA_ARG_TENSOR_SPLIT", "")),
                 "qwen_gpu_layers": int(os.environ.get("ARC_QWEN_GPU_LAYERS", "999")),
                 "qwen_timeout_seconds": int(os.environ.get("ARC_QWEN_TIMEOUT_SECONDS", "700")),
-                "qwen_context_tokens": int(os.environ.get("ARC_QWEN_CONTEXT_TOKENS", "32768")),
+                "qwen_context_tokens": int(os.environ.get("ARC_QWEN_CONTEXT_TOKENS", "131072")),
                 "qwen_minimum_acceptance_context_tokens": int(os.environ.get("ARC_QWEN_MINIMUM_ACCEPTANCE_CONTEXT_TOKENS", "65536")),
                 "qwen_max_input_tokens": int(os.environ.get("ARC_QWEN_MAX_INPUT_TOKENS", "65536")),
                 "qwen_max_output_tokens": int(os.environ.get("ARC_QWEN_MAX_OUTPUT_TOKENS", "49152")),
@@ -592,7 +592,7 @@ def _preflight_script_source() -> str:
         assert int(delegate.config.get('qwen_reasoning_budget_tokens', -1)) == reasoning_budget_tokens, repr(delegate.config)
         assert delegate.config.get('qwen_vllm_model') == 'ravinderonkaggle/muse-glimmer-30b-bf16', repr(delegate.config)
         assert delegate.config.get('qwen_multimodal_enabled') is True, repr(delegate.config)
-        assert int(delegate.config.get('qwen_context_tokens', 0)) == 32768, repr(delegate.config)
+        assert int(delegate.config.get('qwen_context_tokens', 0)) == 131072, repr(delegate.config)
         assert int(delegate.config.get('qwen_max_input_tokens', 0)) == 65536, repr(delegate.config)
         assert int(delegate.config.get('qwen_max_output_tokens', 0)) == 49152, repr(delegate.config)
         expected_temperature = float(os.environ.get('ARC_QWEN_TEMPERATURE', '0.7'))
@@ -707,7 +707,7 @@ def _adapt_working_phase_b_source(source: str) -> str:
                 'environment_adapter': None,
                 'external_action_effect_research': True,
                 'action_effect_exploration_before_qwen': True,
-                'qwen_context_tokens': int(os.environ.get('ARC_QWEN_CONTEXT_TOKENS', '32768')),
+                'qwen_context_tokens': int(os.environ.get('ARC_QWEN_CONTEXT_TOKENS', '131072')),
                 'qwen_minimum_acceptance_context_tokens': 65536,
                 'qwen_max_input_tokens': int(os.environ.get('ARC_QWEN_MAX_INPUT_TOKENS', '65536')),
                 'qwen_max_output_tokens': int(os.environ.get('ARC_QWEN_MAX_OUTPUT_TOKENS', '49152')),
