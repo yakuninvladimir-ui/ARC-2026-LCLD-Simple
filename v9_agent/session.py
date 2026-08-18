@@ -692,14 +692,74 @@ class GameSession:
             )
             # Count the real invocation even when the backend times out or returns malformed output.
             record_qwen_call(role, state.level_index, state.step_index, self.budget)
-            # Anti-fixation: when consecutive PRIMARY calls produce only rejected
-            # hypotheses (dominant failure mode observed live: the model rephrases
-            # the same failed trajectory), escalate sampling temperature to break
-            # the attractor. Streak resets on any productive call or level change.
+            
+            # Anti-fixation: Semantic fixation detector
+            # Check if last 3 hypotheses have identical structure but different goals
+            semantic_fixation_detected = False
+            if role is QwenRole.PRIMARY and len(self.bank.semantic_test_queue) >= 3:
+                recent = self.bank.semantic_test_queue[-3:]
+                structures = []
+                for hyp in recent:
+                    test_plan = getattr(hyp, "test_plan", ()) or ()
+                    # Extract (action_id, kind) structure from each step
+                    struct = tuple((getattr(step, "action_id", None), getattr(step, "kind", None)) for step in test_plan)
+                    goal_target = getattr(hyp, "target_object_id", None) or getattr(hyp, "hypothesis_id", None)
+                    structures.append((struct, goal_target))
+                # Check if structures are identical but goals differ
+                if len(structures) == 3:
+                    first_struct = structures[0][0]
+                    all_same_struct = all(s[0] == first_struct for s in structures)
+                    all_diff_goals = len(set(s[1] for s in structures)) == 3
+                    if all_same_struct and all_diff_goals and first_struct:
+                        semantic_fixation_detected = True
+                        runtime_log(
+                            "semantic_fixation_detected",
+                            level=state.level_index,
+                            step=state.step_index,
+                            structure=first_struct,
+                            goals=[s[1] for s in structures],
+                        )
+                        # Force role change to RESEARCH or COORDINATE to gather new facts
+                        role = QwenRole.RESEARCH
+            
+            # Anti-fixation: Logarithmic temperature scaling
             call_config = self.config
             if role is QwenRole.PRIMARY and self._qwen_empty_primary_streak > 0:
-                escalated = min(0.9, float(self.config.qwen_temperature) + 0.2 * self._qwen_empty_primary_streak)
+                import math
+                escalated = min(0.9, float(self.config.qwen_temperature) + 0.15 * math.log(self._qwen_empty_primary_streak + 1))
                 call_config = replace(self.config, qwen_temperature=escalated)
+            
+            # Anti-fixation: Inject negative constraints from recent trajectory rejections
+            if isinstance(packet, dict):
+                recent_rejections = [
+                    r for r in getattr(self.bank, "invalid_rejections", [])[-10:]
+                    if isinstance(r, dict) and r.get("reason") == "trajectory_verifier_reject"
+                ]
+                if recent_rejections:
+                    # Extract top-2 forbidden action structures
+                    forbidden_actions: list[str] = []
+                    reasons: list[str] = []
+                    for rej in recent_rejections[:2]:
+                        details = rej.get("details") or {}
+                        hyp_id = rej.get("hypothesis_id")
+                        verifier_reason = rej.get("verifier_reason", "")
+                        # Try to extract action_ids from the rejected hypothesis
+                        if hyp_id:
+                            for hyp in list(self.bank.semantic_test_queue) + list(self.bank.rejected):
+                                if getattr(hyp, "hypothesis_id", None) == hyp_id:
+                                    test_plan = getattr(hyp, "test_plan", ()) or ()
+                                    for step in test_plan:
+                                        aid = getattr(step, "action_id", None)
+                                        if aid and aid not in forbidden_actions:
+                                            forbidden_actions.append(aid)
+                        if verifier_reason and verifier_reason not in reasons:
+                            reasons.append(verifier_reason)
+                    if forbidden_actions:
+                        packet["negative_constraints"] = [{
+                            "forbidden_actions": forbidden_actions[:4],
+                            "reason": "; ".join(reasons[:2]) or "trajectory_verification_failed",
+                        }]
+            
             proposals = self.qwen.call(role, packet, call_config)
             self._qwen_successful_calls_this_game += 1
             invalid_before = len(self.bank.invalid_rejections)

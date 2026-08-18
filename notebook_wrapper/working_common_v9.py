@@ -620,7 +620,7 @@ def phase_b_model_smoke_or_die():
             'content': 'Reply with exactly OK.',
         }],
         'temperature': 0.7,
-        'top_p': 1.0,
+        'top_p': 0.9,
         'max_tokens': 8,
         'chat_template_kwargs': {'enable_thinking': False},
     }

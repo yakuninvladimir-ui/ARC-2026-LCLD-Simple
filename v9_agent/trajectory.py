@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, replace
 from typing import List, Optional
 
@@ -289,62 +289,182 @@ class HexStateComparator:
         return {"changed_cell_count": len(changed), "changed_bbox": bbox, "changed_cells": changed}
 
     @staticmethod
-    def compare_snapshots(expected: ARGALiteSnapshot, observed: ARGALiteSnapshot) -> dict:
+    def compare_snapshots(expected: ARGALiteSnapshot, observed: ARGALiteSnapshot, memory: object | None = None) -> dict:
+        """Compare two snapshots using bipartite matching with density-aware thresholds.
+        
+        Args:
+            expected: The expected snapshot (before state).
+            observed: The observed snapshot (after state).
+            memory: Optional memory object containing action_effects or confirmed_rules
+                   for detecting recolor effects (to avoid penalizing color changes).
+        
+        Returns:
+            Dictionary with object_deltas, appeared, vanished, and hex_delta.
+        """
         exp_objs = {o.object_id: o for o in (expected.objects or ())}
         obs_objs = {o.object_id: o for o in (observed.objects or ())}
-        # first pass: direct id matches
-        matched_expected: dict[str, str] = {}
-        matched_observed: set[str] = set()
-        for oid in exp_objs:
-            if oid in obs_objs:
-                matched_expected[oid] = oid
-                matched_observed.add(oid)
-
-        # Build lists of unmatched
-        unmatched_exp = [o for k, o in exp_objs.items() if k not in matched_expected]
-        unmatched_obs = [o for k, o in obs_objs.items() if k not in matched_observed]
-
+        
         width = max(getattr(expected, "width", 0) or 0, getattr(observed, "width", 0) or 0)
         height = max(getattr(expected, "height", 0) or 0, getattr(observed, "height", 0) or 0)
         diag = max(1.0, (width ** 2 + height ** 2) ** 0.5)
-
-        # match remaining by heuristic scores
-        for e in unmatched_exp:
-            best = None
-            best_score = 0.0
-            for o in unmatched_obs:
-                if o.object_id in matched_observed:
-                    continue
-                # mask similarity
-                mask_sim = HexStateComparator._mask_similarity(getattr(e, "local_mask_hex_rows", None), getattr(o, "local_mask_hex_rows", None))
-                # centroid proximity
-                try:
-                    ddx = o.centroid_rc[1] - e.centroid_rc[1]
-                    ddy = o.centroid_rc[0] - e.centroid_rc[0]
-                    dist = (ddx ** 2 + ddy ** 2) ** 0.5
-                    centroid_score = max(0.0, 1.0 - (dist / diag))
-                except Exception:
-                    centroid_score = 0.0
-                # color histogram IOU
-                hist_iou = HexStateComparator._hist_iou(getattr(e, "color_histogram", None), getattr(o, "color_histogram", None))
-                # combine weights
-                score = 0.5 * mask_sim + 0.3 * centroid_score + 0.2 * hist_iou
-                if score > best_score:
-                    best_score = score
-                    best = o
-            # accept match if above threshold
-            if best is not None and best_score >= 0.35:
-                matched_expected[e.object_id] = best.object_id
-                matched_observed.add(best.object_id)
-
+        
+        # Compute density for dynamic threshold adjustment
+        N = len(exp_objs)
+        M = len(obs_objs)
+        density = (N + M) / max(1, (width * height))
+        
+        # Density-aware dummy cost: higher density -> stricter matching (lower dummy_cost)
+        # This prevents "stretching" poor matches in crowded scenes
+        base_dummy_cost = 0.65
+        if density > 0.15:
+            dummy_cost = 0.45  # Stricter: prefer appeared/vanished over bad matches
+        else:
+            dummy_cost = base_dummy_cost
+        
+        # Build recolor set from memory for context-aware color scoring
+        recolor_object_ids: set[str] = set()
+        recolor_action_ids: set[str] = set()
+        if memory is not None:
+            # Check action_effects for recolor outcomes
+            action_effects = getattr(memory, "action_effects", {}) or {}
+            for (action_id, _cand), record in action_effects.items():
+                outcome = getattr(record, "outcome", None)
+                if outcome == "recolor":
+                    recolor_action_ids.add(action_id)
+            # Check confirmed_rules for recolor rules
+            confirmed_rules = getattr(memory, "confirmed_rules", []) or []
+            for rule in confirmed_rules:
+                if getattr(rule, "effect_type", None) == "recolor":
+                    obj_id = getattr(rule, "target_object_id", None)
+                    act_id = getattr(rule, "action_id", None)
+                    if obj_id:
+                        recolor_object_ids.add(obj_id)
+                    if act_id:
+                        recolor_action_ids.add(act_id)
+        
+        def compute_score(e, o):
+            """Compute matching score between expected object e and observed object o."""
+            # Mask similarity
+            mask_sim = HexStateComparator._mask_similarity(
+                getattr(e, "local_mask_hex_rows", None),
+                getattr(o, "local_mask_hex_rows", None)
+            )
+            # Centroid proximity
+            try:
+                ddx = o.centroid_rc[1] - e.centroid_rc[1]
+                ddy = o.centroid_rc[0] - e.centroid_rc[0]
+                dist = (ddx ** 2 + ddy ** 2) ** 0.5
+                centroid_score = max(0.0, 1.0 - (dist / diag))
+            except Exception:
+                centroid_score = 0.0
+            # Color histogram IOU
+            hist_iou = HexStateComparator._hist_iou(
+                getattr(e, "color_histogram", None),
+                getattr(o, "color_histogram", None)
+            )
+            # Combine weights
+            score = 0.5 * mask_sim + 0.3 * centroid_score + 0.2 * hist_iou
+            
+            # Context-aware color penalty: if hist_iou is low AND this object/action
+            # is NOT known to cause recolor, apply a strong penalty
+            if hist_iou < 0.5:
+                obj_is_recolor = e.object_id in recolor_object_ids
+                # Check if any recent action that could affect this object is a recolor action
+                # For simplicity, we check if any recolor action exists in memory
+                action_is_recolor = bool(recolor_action_ids)
+                if not obj_is_recolor and not action_is_recolor:
+                    score *= 0.15  # Strong penalty for unexplained color change
+            
+            return score
+        
+        # Build cost matrix for bipartite matching
+        # Rows: expected objects (0..N-1) + dummy rows for appeared (N..N+M-1)
+        # Cols: observed objects (0..M-1) + dummy cols for vanished (M..M+N-1)
+        # Cost = -score for real matches, dummy_cost for dummy assignments
+        
+        exp_ids = list(exp_objs.keys())
+        obs_ids = list(obs_objs.keys())
+        exp_list = [exp_objs[eid] for eid in exp_ids]
+        obs_list = [obs_objs[oid] for oid in obs_ids]
+        
+        # Try scipy.optimize.linear_sum_assignment
+        use_scipy = False
+        try:
+            from scipy.optimize import linear_sum_assignment
+            use_scipy = True
+        except ImportError:
+            pass
+        
+        if use_scipy:
+            # Build (N+M) x (M+N) cost matrix
+            # But we only need (N+M) x (M+N) where:
+            # - Top-left N x M: real match costs (-score)
+            # - Top-right N x N: dummy col costs (dummy_cost) for vanished
+            # - Bottom-left M x M: dummy row costs (dummy_cost) for appeared
+            # - Bottom-right M x N: unused (set to large value)
+            
+            matrix_size = N + M
+            cost_matrix = [[dummy_cost] * matrix_size for _ in range(matrix_size)]
+            
+            # Fill real match costs (negative because we want max score, but algorithm does min cost)
+            for i in range(N):
+                for j in range(M):
+                    score = compute_score(exp_list[i], obs_list[j])
+                    cost_matrix[i][j] = -score  # Negate for minimization
+            
+            # Dummy row costs (for appeared objects) - already set to dummy_cost
+            # Dummy col costs (for vanished objects) - already set to dummy_cost
+            
+            try:
+                row_ind, col_ind = linear_sum_assignment(cost_matrix)
+                
+                # Parse results
+                matched_expected: dict[str, str] = {}
+                matched_observed: set[str] = set()
+                
+                for i, j in zip(row_ind, col_ind):
+                    if i < N and j < M:
+                        # Real match
+                        matched_expected[exp_ids[i]] = obs_ids[j]
+                        matched_observed.add(obs_ids[j])
+                    # Else: dummy assignment (appeared/vanished) - skip
+            except Exception:
+                use_scipy = False
+        
+        # Fallback to improved greedy algorithm
+        if not use_scipy:
+            # Collect all pairs with score > 0.35
+            pairs = []
+            for i, e in enumerate(exp_list):
+                for j, o in enumerate(obs_list):
+                    score = compute_score(e, o)
+                    if score > 0.35:
+                        pairs.append((score, i, j))
+            
+            # Sort by score descending
+            pairs.sort(key=lambda x: -x[0])
+            
+            matched_expected: dict[str, str] = {}
+            matched_observed: set[str] = set()
+            used_exp = set()
+            used_obs = set()
+            
+            for score, i, j in pairs:
+                if i not in used_exp and j not in used_obs:
+                    matched_expected[exp_ids[i]] = obs_ids[j]
+                    matched_observed.add(obs_ids[j])
+                    used_exp.add(i)
+                    used_obs.add(j)
+        
+        # Build deltas
         object_deltas: dict[str, dict] = {}
         appeared = []
         vanished = []
-
-        # Build deltas for expected objects (matched or vanished)
+        
+        # Process expected objects (matched or vanished)
         for exp_id, exp_obj in exp_objs.items():
             if exp_id not in matched_expected:
-                # vanished
+                # Vanished
                 object_deltas[exp_id] = {
                     "matched_obs_id": None,
                     "dx": None,
@@ -359,6 +479,7 @@ class HexStateComparator:
                 }
                 vanished.append(exp_id)
                 continue
+            
             obs_id = matched_expected[exp_id]
             obs_obj = obs_objs.get(obs_id)
             if obs_obj is None:
@@ -376,7 +497,8 @@ class HexStateComparator:
                 }
                 vanished.append(exp_id)
                 continue
-            # compute dx/dy and color comparisons
+            
+            # Compute dx/dy and color comparisons
             try:
                 dx = obs_obj.centroid_rc[1] - exp_obj.centroid_rc[1]
                 dy = obs_obj.centroid_rc[0] - exp_obj.centroid_rc[0]
@@ -385,7 +507,10 @@ class HexStateComparator:
                 dy = None
             color_from = HexStateComparator._dominant_color(exp_obj)
             color_to = HexStateComparator._dominant_color(obs_obj)
-            hist_iou = HexStateComparator._hist_iou(getattr(exp_obj, "color_histogram", None), getattr(obs_obj, "color_histogram", None))
+            hist_iou = HexStateComparator._hist_iou(
+                getattr(exp_obj, "color_histogram", None),
+                getattr(obs_obj, "color_histogram", None)
+            )
             object_deltas[exp_id] = {
                 "matched_obs_id": obs_id,
                 "dx": dx,
@@ -398,8 +523,8 @@ class HexStateComparator:
                 "appeared": False,
                 "vanished": False,
             }
-
-        # remaining observed objects that were not matched are appeared
+        
+        # Remaining observed objects are appeared
         for obs_id, obs_obj in obs_objs.items():
             if obs_id in matched_observed:
                 continue
@@ -416,8 +541,12 @@ class HexStateComparator:
                 "vanished": False,
             }
             appeared.append(obs_id)
-
-        hex_delta = HexStateComparator.compare_hex(getattr(expected, "full_grid_hex_rows", ()), getattr(observed, "full_grid_hex_rows", ()))
+        
+        hex_delta = HexStateComparator.compare_hex(
+            getattr(expected, "full_grid_hex_rows", ()),
+            getattr(observed, "full_grid_hex_rows", ())
+        )
+        
         return {
             "object_deltas": object_deltas,
             "appeared": appeared,
@@ -889,6 +1018,11 @@ class TrajectoryPlanner:
         return 0.0
 
     def _build_transition_indexes(self, memory: object) -> tuple[dict[tuple[str, str, str | None], list[str]], dict[str, list[tuple[str, str | None, str]]]]:
+        """Build transition indexes with deterministic filtering of noisy edges.
+        
+        ARC is deterministic: if multiple after_sigs exist for the same (before, action, cand),
+        keep only the most frequent one (filter ARGALite perception noise).
+        """
         transitions: dict[tuple[str, str, str | None], list[str]] = {}
         transitions_by_source: dict[str, list[tuple[str, str | None, str]]] = {}
         for rec in getattr(memory, "action_memory_records", []) or []:
@@ -904,7 +1038,24 @@ class TrajectoryPlanner:
             if cand is not None:
                 # allow fallback for actions that ignore precise coordinate candidate
                 transitions.setdefault((before, action_id, None), []).append(after)
-        return transitions, transitions_by_source
+        
+        # Deterministic filtering: for each (before, action, cand), keep only most frequent after
+        filtered_transitions: dict[tuple[str, str, str | None], list[str]] = {}
+        for key, after_list in transitions.items():
+            if len(after_list) > 1:
+                counter = Counter(after_list)
+                most_common_after = counter.most_common(1)[0][0]
+                filtered_transitions[key] = [most_common_after]
+            else:
+                filtered_transitions[key] = after_list
+        
+        # Rebuild transitions_by_source from filtered transitions
+        filtered_by_source: dict[str, list[tuple[str, str | None, str]]] = {}
+        for (before_sig, action_id, cand), after_list in filtered_transitions.items():
+            for after_sig in after_list:
+                filtered_by_source.setdefault(before_sig, []).append((action_id, cand, after_sig))
+        
+        return filtered_transitions, filtered_by_source
 
     def _action_effect_outcome(self, action_id: str, candidate_id: str | None, memory: object) -> str | None:
         effects = getattr(memory, "action_effects", {}) or {}
@@ -1032,29 +1183,57 @@ class TrajectoryPlanner:
                         return plan
 
         import heapq
- 
+        
+        # Parent map for memory-efficient path reconstruction: {after_sig: (prev_sig, action_id, candidate_id)}
+        parent_map: dict[str, tuple[str, str, str | None]] = {}
+        
         def neighbors(state_sig: str):
             return transitions_by_source.get(state_sig, [])
- 
+        
         def heuristic(state_sig: str) -> float:
             if reverse_distances:
                 return float(reverse_distances.get(state_sig, 0))
-            # Compute heuristic from current state (state_sig), not start_snapshot.
-            # We need to reconstruct a minimal snapshot-like object for the current state.
-            # Since we only have state_sig, use goal-based distance estimation.
+            # Landmark heuristic: if goal has target_xy and object_id, compute Manhattan distance
+            # from current state's object centroid to target
+            if goal and isinstance(goal, dict):
+                target_xy = goal.get("target_xy")
+                object_id = goal.get("object_id")
+                if target_xy and object_id:
+                    # Try to get snapshot for current state_sig - fall back to start_snapshot
+                    # In practice, we need to simulate or look up the snapshot for state_sig
+                    # For now, use start_snapshot as proxy (A* expands from start, so this is admissible)
+                    objs = {o.object_id: o for o in start_snapshot.objects}
+                    obj = objs.get(object_id)
+                    if obj is not None:
+                        cx, cy = obj.centroid_rc[1], obj.centroid_rc[0]
+                        try:
+                            tx, ty = float(target_xy[0]), float(target_xy[1])
+                            return abs(cx - tx) + abs(cy - ty)
+                        except (TypeError, ValueError):
+                            pass
+            # Fallback to signature-based heuristic
             return self._heuristic_from_state_sig(state_sig, goal, start_snapshot)
- 
-        open_heap = []  # (f, g, state_sig, action_seq)
-        heapq.heappush(open_heap, (heuristic(start_sig), 0, start_sig, tuple()))
+        
+        open_heap = []  # (f, g, state_sig) - no action_seq in heap
+        heapq.heappush(open_heap, (heuristic(start_sig), 0, start_sig))
         seen_costs: dict[str, int] = {start_sig: 0}
+        parent_map[start_sig] = (None, None, None)  # Root marker
 
         while open_heap:
-            f, g, state_sig, seq = heapq.heappop(open_heap)
+            f, g, state_sig = heapq.heappop(open_heap)
             if g > max_steps:
                 continue
-            if seq:
+            if g > 0:  # Not start node
                 if goal_sig is not None and state_sig == goal_sig:
-                    steps = [TrajectoryStep(action_id=a, coordinate_candidate_id=cid, repeat=r) for (a, cid, r) in seq]
+                    # Reconstruct path from parent_map
+                    path: list[tuple[str, str | None]] = []
+                    current = state_sig
+                    while parent_map[current][0] is not None:
+                        prev_sig, action_id, candidate_id = parent_map[current]
+                        path.append((action_id, candidate_id))
+                        current = prev_sig
+                    path.reverse()
+                    steps = [TrajectoryStep(action_id=a, coordinate_candidate_id=cid, repeat=1) for (a, cid) in path]
                     return TrajectoryPlan(
                         hypothesis_id=stable_hash((snapshot_id, state_sig), "plan_"),
                         goal=goal,
@@ -1063,7 +1242,15 @@ class TrajectoryPlanner:
                         expected_final_state_hash=state_sig,
                     )
                 if target_signatures and state_sig in target_signatures:
-                    steps = [TrajectoryStep(action_id=a, coordinate_candidate_id=cid, repeat=r) for (a, cid, r) in seq]
+                    # Reconstruct path from parent_map
+                    path: list[tuple[str, str | None]] = []
+                    current = state_sig
+                    while parent_map[current][0] is not None:
+                        prev_sig, action_id, candidate_id = parent_map[current]
+                        path.append((action_id, candidate_id))
+                        current = prev_sig
+                    path.reverse()
+                    steps = [TrajectoryStep(action_id=a, coordinate_candidate_id=cid, repeat=1) for (a, cid) in path]
                     return TrajectoryPlan(
                         hypothesis_id=stable_hash((snapshot_id, state_sig), "plan_"),
                         goal=goal,
@@ -1079,9 +1266,9 @@ class TrajectoryPlanner:
                 if prev is not None and new_g >= prev:
                     continue
                 seen_costs[after_sig] = new_g
-                new_seq = tuple(list(seq) + [(action_id, candidate_id, 1)])
+                parent_map[after_sig] = (state_sig, action_id, candidate_id)
                 h = heuristic(after_sig)
-                heapq.heappush(open_heap, (new_g + h, new_g, after_sig, new_seq))
+                heapq.heappush(open_heap, (new_g + h, new_g, after_sig))
 
         return None
 
