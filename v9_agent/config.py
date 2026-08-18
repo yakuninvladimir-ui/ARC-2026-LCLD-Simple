@@ -26,7 +26,7 @@ class V9Config:
     qwen_top_k: int = 20
     qwen_top_p: float = 0.95
     qwen_min_p: float = 0.0
-    qwen_presence_penalty: float = 1.5
+    qwen_presence_penalty: float = 0.05
     qwen_repeat_penalty: float = 1.0
     qwen_seed: int = 0
     qwen_timeout_seconds: int = 800
