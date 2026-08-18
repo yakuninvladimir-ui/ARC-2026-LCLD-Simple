@@ -31,7 +31,11 @@ QWEN_THINKING_ENABLED = True
 # The OSS vLLM OpenAI endpoint has no per-request thinking-budget parameter.
 # ``max_tokens`` is the hard cap for thinking plus final JSON.
 QWEN_REASONING_BUDGET_TOKENS = 32000
-VLLM_WHEELHOUSE_STAMP = 'vllm==0.27.1 torch==2.10.0 flashinfer==0.6.6\n'
+# Было:
+# VLLM_WHEELHOUSE_STAMP = 'vllm==0.27.1 torch==2.10.0 flashinfer==0.6.6\n'
+
+# Стало (подставьте версии из вашего requirements.lock):
+VLLM_WHEELHOUSE_STAMP = 'vllm==0.27.1 torch==2.13.0 flashinfer==0.6.16.post3\n'
 
 working_root = pathlib.Path('/kaggle/working')
 working_root.mkdir(parents=True, exist_ok=True)
@@ -169,6 +173,10 @@ def _vllm_env():
         'VLLM_NO_USAGE_STATS': '1',
         'VLLM_XGRAMMAR_CACHE_MB': '64',
         'VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS': '700',
+        # === FlashInfer workaround для RTX PRO 6000 Blackwell (CUDA 13) ===
+        'VLLM_USE_FLASHINFER_SAMPLER': '0',
+        'VLLM_ATTENTION_BACKEND': 'FLASH_ATTN',
+        # ===================================================================
     })
     return env
 
@@ -296,6 +304,7 @@ def _build_vllm_command(model_path):
         '--dtype', 'bfloat16',
         '--kv-cache-dtype', 'fp8',
         '--gpu-memory-utilization', '0.92',
+        '--attention-backend', 'FLASH_ATTN',
         '--default-chat-template-kwargs', json.dumps({
             'enable_thinking': QWEN_THINKING_ENABLED,
         }),
