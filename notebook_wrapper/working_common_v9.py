@@ -619,7 +619,7 @@ def phase_b_model_smoke_or_die():
             'role': 'user',
             'content': 'Reply with exactly OK.',
         }],
-        'temperature': 0.0,
+        'temperature': 0.7,
         'top_p': 1.0,
         'max_tokens': 8,
         'chat_template_kwargs': {'enable_thinking': False},
@@ -865,9 +865,9 @@ def run_phase_a_heavy_smoke():
     print('[HEAVY-SMOKE] GPU before:', _smoke_gpu_info(), flush=True)
 
     # --- baseline 1: чистый decode без thinking ---
-    base = {'model': QWEN_MODEL_NAME, 'stream': False, 'max_tokens': 1024, 'temperature': 0.7, 'top_p': 0.9,
+    base = {'model': QWEN_MODEL_NAME, 'stream': False, 'max_tokens': 65536, 'temperature': 0.7, 'top_p': 0.9,
             'messages': [{'role': 'user', 'content': 'Count from 1 to 400, one number per line.'}],
-            'chat_template_kwargs': {'enable_thinking': False}}
+            'chat_template_kwargs': {'enable_thinking': True}}
     print('[HEAVY-SMOKE]', json.dumps(_smoke_send('baseline_no_thinking', base, 600), sort_keys=True), flush=True)
 
     # --- baseline 2: thinking без vision/schema ---
