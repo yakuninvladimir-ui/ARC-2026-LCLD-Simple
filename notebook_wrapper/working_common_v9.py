@@ -20,7 +20,7 @@ VLLM_PORT = 1234
 VLLM_BASE_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/v1'
 VLLM_HEALTH_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/health'
 VLLM_STARTUP_TIMEOUT_SECONDS = 900
-VLLM_MAX_MODEL_LEN = 32768
+VLLM_MAX_MODEL_LEN = 131072
 VLLM_MAX_NUM_SEQS = 5
 VLLM_TENSOR_PARALLEL_SIZE = 1
 QWEN_MAX_INPUT_TOKENS = 65536
@@ -32,10 +32,10 @@ QWEN_THINKING_ENABLED = True
 # ``max_tokens`` is the hard cap for thinking plus final JSON.
 QWEN_REASONING_BUDGET_TOKENS = 32000
 # Было:
-# VLLM_WHEELHOUSE_STAMP = 'vllm==0.27.1 torch==2.10.0 flashinfer==0.6.6\n'
+# VLLM_WHEELHOUSE_STAMP = 'vllm==0.27.2rc1.dev189+gf4b161d7f torch==2.13.0 flashinfer==0.6.6\n'
 
 # Стало (подставьте версии из вашего requirements.lock):
-VLLM_WHEELHOUSE_STAMP = 'vllm==0.27.1 torch==2.13.0 flashinfer==0.6.16.post3\n'
+VLLM_WHEELHOUSE_STAMP = 'vllm==0.27.2rc1.dev189+gf4b161d7f torch==2.13.0 flashinfer==0.6.16.post3\n'
 
 working_root = pathlib.Path('/kaggle/working')
 working_root.mkdir(parents=True, exist_ok=True)
@@ -302,14 +302,13 @@ def _build_vllm_command(model_path):
         '--enable-prefix-caching',
         '--mm-processor-cache-gb', '0',
         '--dtype', 'bfloat16',
-        '--kv-cache-dtype', 'fp8',
+        '--kv-cache-dtype', 'auto',
         '--gpu-memory-utilization', '0.92',
         '--attention-backend', 'FLASH_ATTN',
         '--default-chat-template-kwargs', json.dumps({
             'enable_thinking': QWEN_THINKING_ENABLED,
         }),
         '--max-model-len', str(VLLM_MAX_MODEL_LEN),
-        '--enforce-eager', 'False',
     ]
     if QWEN_THINKING_ENABLED:
         command.extend([
@@ -488,7 +487,7 @@ def structural_preflight():
     expected = {
         'qwen_backend': 'vllm',
         'qwen_multimodal_enabled': True,
-        'qwen_context_tokens': 32768,
+        'qwen_context_tokens': 131072,
         'qwen_minimum_acceptance_context_tokens': 65536,
         'qwen_max_input_tokens': 65536,
         'qwen_max_output_tokens': 49152,
